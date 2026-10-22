@@ -1,91 +1,137 @@
-"""Run a filter over a simulated flight and score it against ground truth."""
+"""Run a filter over a simulated flight and record errors and NEES."""
 
 from dataclasses import dataclass
 
 import numpy as np
 
-from gal3uwb.filters.eskf import BETA, DIM, GAMMA, POS, ClockEskf, State
+from gal3uwb.filters.common import BA, BG, CLOCK, DELTA, DIM, POS, RHO, ROT, VEL, Estimate, FilterNoise, nees
 from gal3uwb.params import C
 
-# Initial 1-sigma uncertainty per error-state block.
+# Prior standard deviations; the initial estimate is drawn from this prior.
 INITIAL_SIGMA = {
-    "rot": np.array([0.02, 0.02, 0.05]),  # [rad]
+    "rot": np.array([0.02, 0.02, 0.05]),  # [rad], body frame
     "vel": 0.1,  # [m/s]
     "pos": 0.3,  # [m]
-    "beta": 1.0,  # [m]
-    "gamma": C * 5e-6,  # [m/s], 5 ppm
+    "gyro_bias": 0.01,  # [rad/s]
+    "accel_bias": 0.05,  # [m/s^2]
+    "delta": 1.0 / C,  # [s], i.e. 1 m: the first transmission pins the offset down
+    "rho": 20e-6,  # [-]
 }
 
+# NEES blocks reported in the physical error coordinates. "pvc" (position, velocity,
+# clock) leaves out attitude and biases, whose truth is only approximate on real data.
+BLOCKS = {name: np.arange(DIM)[idx] for name, idx in {
+    "full": slice(0, DIM), "rot": ROT, "vel": VEL, "pos": POS, "bias": slice(9, 15), "clock": CLOCK,
+    "pvc": np.r_[3:9, 15:17],
+}.items()}
 
-@dataclass(frozen=True)
+
+def prior_covariance(sigma=INITIAL_SIGMA):
+    d = np.zeros(DIM)
+    d[ROT] = sigma["rot"] ** 2
+    d[VEL] = sigma["vel"] ** 2
+    d[POS] = sigma["pos"] ** 2
+    d[BG] = sigma["gyro_bias"] ** 2
+    d[BA] = sigma["accel_bias"] ** 2
+    d[DELTA] = sigma["delta"] ** 2
+    d[RHO] = sigma["rho"] ** 2
+    return np.diag(d)
+
+
+def truth_estimate(truth, k) -> Estimate:
+    return Estimate(truth.R[k], truth.v[k], truth.p[k], truth.gyro_bias[k], truth.accel_bias[k], truth.delta[k],
+                    truth.rho[k])
+
+
+def initial_estimate(truth0: Estimate, P0, rng) -> Estimate:
+    """Pose, velocity and clock offset drawn from the prior around the truth. Biases and
+    skew start at zero, which matches the prior because their truth is drawn from it."""
+    e = rng.multivariate_normal(np.zeros(DIM), P0)
+    e[9:15] = 0.0
+    e[RHO] = 0.0
+    x0 = truth0.retract(-e)
+    return Estimate(x0.R, x0.v, x0.p, np.zeros(3), np.zeros(3), x0.delta, 0.0)
+
+
+@dataclass
 class FilterRun:
-    T: np.ndarray  # tag times of recorded samples
-    err: np.ndarray  # (N, DIM) truth relative to estimate
-    nees: np.ndarray
-    nees_pos: np.ndarray
-    nees_clock: np.ndarray
-    p_hat: np.ndarray  # (N, 3)
+    T: np.ndarray  # (M,) record times [s]
+    err: np.ndarray  # (M, 17) physical error, truth = estimate.retract(err)
+    nees: dict  # block -> (M,) NEES in physical coordinates
+    nees_native: np.ndarray  # (M,) full NEES in the filter's own error coordinates
+    yaw_err: np.ndarray  # (M,) world-frame yaw error [rad]
+    nees_yaw: np.ndarray  # (M,)
 
 
-def truth_state(truth, k):
-    return State(
-        truth.R[k], truth.v[k], truth.p[k], truth.gyro_bias[k], truth.accel_bias[k], truth.beta[k], truth.gamma[k]
-    )
+def run_filter(sim, filter_cls, x0, P0, noise: FilterNoise, record_every=10) -> FilterRun:
+    imu, uwb, truth = sim.imu, sim.uwb, sim.truth
+    f = filter_cls(x0, P0, noise)
+    rec = {"T": [], "err": [], "native": [], "yaw": [], "nees_yaw": [], **{b: [] for b in BLOCKS}}
 
+    def record(k):
+        x_true = truth_estimate(truth, k)
+        x_hat = f.estimate()
+        e, P = x_hat.error_to(x_true), f.physical_covariance()
+        rec["T"].append(imu.T[k])
+        rec["err"].append(e)
+        for name, idx in BLOCKS.items():
+            rec[name].append(nees(e[idx], P[np.ix_(idx, idx)]))
+        eps, P_native = f.native_error(x_true)
+        rec["native"].append(nees(eps, P_native))
+        # World-frame attitude error R_hat theta; its z component is the yaw error.
+        theta_w = x_hat.R @ e[ROT]
+        P_w = x_hat.R @ P[ROT, ROT] @ x_hat.R.T
+        rec["yaw"].append(theta_w[2])
+        rec["nees_yaw"].append(theta_w[2] ** 2 / P_w[2, 2])
 
-def initial_estimate(sim, rng):
-    """Truth perturbed by a draw from P0; biases start at zero (their prior)."""
-    cfg = sim.config
-    sig = np.concatenate(
-        [
-            INITIAL_SIGMA["rot"],
-            np.full(3, INITIAL_SIGMA["vel"]),
-            np.full(3, INITIAL_SIGMA["pos"]),
-            np.full(3, cfg.gyro_bias_sigma),
-            np.full(3, cfg.accel_bias_sigma),
-            [INITIAL_SIGMA["beta"], INITIAL_SIGMA["gamma"]],
-        ]
-    )
-    x = truth_state(sim.truth, 0).retract(-sig * rng.standard_normal(DIM))
-    x = State(x.R, x.v, x.p, np.zeros(3), np.zeros(3), x.beta, x.gamma)
-    return x, np.diag(sig**2)
-
-
-def _nees(e, P):
-    return float(e @ np.linalg.solve(P, e))
-
-
-def run_filter(sim, coupled, x0, P0, record_every=20):
-    cfg, imu, uwb, truth = sim.config, sim.imu, sim.uwb, sim.truth
-    filt = ClockEskf(x0, P0, cfg.imu_noise, cfg.clock_noise, coupled)
-
-    order = np.argsort(uwb.T_rx)
-    T_rx = uwb.T_rx[order]
-    z = C * (T_rx - uwb.t_tx[order])
-    anchor_pos = sim.anchors[uwb.anchor[order]]
-    j = int(np.searchsorted(T_rx, imu.T[0]))
-
-    rec = {key: [] for key in ("T", "err", "nees", "nees_pos", "nees_clock", "p_hat")}
-    clock = [BETA, GAMMA]
-    for k in range(len(imu.T)):
-        if k % record_every == 0:
-            e = filt.x.local(truth_state(truth, k))
-            P = filt.P
-            rec["T"].append(imu.T[k])
-            rec["err"].append(e)
-            rec["nees"].append(_nees(e, P))
-            rec["nees_pos"].append(_nees(e[POS], P[POS, POS]))
-            rec["nees_clock"].append(_nees(e[clock], P[np.ix_(clock, clock)]))
-            rec["p_hat"].append(filt.x.p)
-
-        T_now, T_end = imu.T[k], imu.T[k] + imu.dT
-        gyro, accel = imu.gyro[k], imu.accel[k]
-        while j < len(T_rx) and T_rx[j] < T_end:
-            if T_rx[j] > T_now:
-                filt.propagate(gyro, accel, T_rx[j] - T_now)
-                T_now = T_rx[j]
-            filt.update_range(z[j], anchor_pos[j], cfg.sigma_range)
+    j, n_tx = 0, len(uwb.T_tx)
+    record(0)
+    for k in range(len(imu.T) - 1):
+        T, T_end = imu.T[k], imu.T[k + 1]
+        g, a = imu.gyro[k], imu.accel[k]
+        while j < n_tx and uwb.T_tx[j] < T_end:
+            if uwb.T_tx[j] > T:
+                f.propagate(g, a, uwb.T_tx[j] - T)
+                T = uwb.T_tx[j]
+            f.update(uwb.y[j], uwb.anchors, sim.lever_arm)
             j += 1
-        filt.propagate(gyro, accel, T_end - T_now)
+        if T_end > T:
+            f.propagate(g, a, T_end - T)
+        if (k + 1) % record_every == 0:
+            record(k + 1)
 
-    return FilterRun(**{key: np.array(val) for key, val in rec.items()})
+    return FilterRun(
+        T=np.array(rec["T"]),
+        err=np.array(rec["err"]),
+        nees={b: np.array(rec[b]) for b in BLOCKS},
+        nees_native=np.array(rec["native"]),
+        yaw_err=np.array(rec["yaw"]),
+        nees_yaw=np.array(rec["nees_yaw"]),
+    )
+
+
+def summarize_run(run: FilterRun, warmup):
+    """Scalar metrics over the part of the run after the warm-up."""
+    keep = run.T >= warmup
+    e = run.err[keep]
+
+    def rms(x):
+        x = x.reshape(len(x), -1)
+        return float(np.sqrt(np.mean(np.sum(x**2, axis=1))))
+
+    out = {
+        "pos_rmse": rms(e[:, POS]),
+        "pos_h_rmse": rms(e[:, 6:8]),
+        "pos_v_rmse": rms(e[:, 8]),
+        "vel_rmse": rms(e[:, VEL]),
+        "rot_rmse_deg": np.degrees(rms(e[:, ROT])),
+        "yaw_rmse_deg": np.degrees(rms(run.yaw_err[keep])),
+        "offset_rmse_m": C * rms(e[:, DELTA]),
+        "rho_rmse_ppm": 1e6 * rms(e[:, RHO]),
+        # NEES per degree of freedom: 1 is consistent.
+        "nees_native": float(run.nees_native[keep].mean()) / DIM,
+        "nees_yaw": float(run.nees_yaw[keep].mean()),
+    }
+    for name, idx in BLOCKS.items():
+        out[f"nees_{name}"] = float(run.nees[name][keep].mean()) / len(idx)
+    return out

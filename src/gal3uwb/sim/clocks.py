@@ -1,6 +1,7 @@
 """Device clock models.
 
 Convention: tag time T, true (network) time t, offset tau = T - t, skew = dtau/dT.
+The filters estimate delta = t - T = -tau and the time-rate bias b_rho = skew.
 The clock is simulated on a uniform tag-time grid and is piecewise linear
 between grid points, so the T <-> t maps are exact inverses.
 """
@@ -34,6 +35,15 @@ class TagClock:
     def covers(self, t):
         """Whether true times t lie within the simulated span."""
         return (t >= self.t[0]) & (t <= self.t[-1])
+
+    def offset(self, T):
+        """tau at tag times T."""
+        _check_span(T, self.T)
+        return np.interp(T, self.T, self.tau)
+
+    def skew_at(self, T):
+        _check_span(T, self.T)
+        return np.interp(T, self.T, self.skew)
 
     def true_time(self, T):
         _check_span(T, self.T)

@@ -1,86 +1,48 @@
-from dataclasses import replace
-
 import numpy as np
+import pytest
 
-from gal3uwb.filters.eskf import propagate
-from gal3uwb.eval.runner import truth_state
-from gal3uwb.params import C, ClockNoise, ImuNoise
-from gal3uwb.sim.scenario import SimConfig, simulate
-from gal3uwb.sim.trajectory import CircleTrajectory
-
-NOISELESS = SimConfig(
-    speed=2.0,
-    skew=1e-2,
-    duration=10.0,
-    sigma_range=0.0,
-    gyro_bias_sigma=0.0,
-    accel_bias_sigma=0.0,
-    imu_noise=ImuNoise(0.0, 0.0, 0.0, 0.0),
-    clock_noise=ClockNoise(0.0, 0.0),
-)
+from gal3uwb.eval.runner import initial_estimate, prior_covariance, run_filter, summarize_run, truth_estimate
+from gal3uwb.filters.common import FilterNoise
+from gal3uwb.filters.ekf import Ekf, range_model
+from gal3uwb.filters.eqf import Eqf
+from gal3uwb.params import C
+from gal3uwb.sim.scenario import SCENARIOS, SimConfig, simulate
 
 
-def test_trajectory_kinematics_are_consistent():
-    traj = CircleTrajectory(2.0)
-    t, h = np.linspace(0, 5, 50), 1e-5
-    np.testing.assert_allclose((traj.position(t + h) - traj.position(t - h)) / (2 * h), traj.velocity(t), atol=1e-6)
-    np.testing.assert_allclose(
-        (traj.velocity(t + h) - traj.velocity(t - h)) / (2 * h), traj.acceleration(t), atol=1e-6
-    )
-    R = traj.rotation(t)
-    np.testing.assert_allclose(np.einsum("nji,njk->nik", R, R), np.broadcast_to(np.eye(3), R.shape), atol=1e-12)
+def test_uwb_measurements_match_truth_at_transmission():
+    sim = simulate(SimConfig(speed=2.0, clock=SCENARIOS["gaussian_skew"], duration=3.0, sigma_range=0.0), seed=3)
+    k = 100  # an IMU instant; build a transmission there and compare with the model
+    T_k = sim.truth.T[k]
+    j = np.argmin(np.abs(sim.uwb.T_tx - T_k))
+    assert abs(sim.uwb.T_tx[j] - T_k) < 0.05
+    i = np.searchsorted(sim.truth.T, sim.uwb.T_tx[j])
+    # Linear interpolation of the truth between IMU instants is good to ~1e-5 m here.
+    w = (sim.uwb.T_tx[j] - sim.truth.T[i - 1]) / (sim.truth.T[i] - sim.truth.T[i - 1])
+    x0, x1 = truth_estimate(sim.truth, i - 1), truth_estimate(sim.truth, i)
+    x = x0.retract(w * x0.error_to(x1))
+    y, _ = range_model(x, sim.uwb.anchors, sim.lever_arm)
+    np.testing.assert_allclose(sim.uwb.y[j], y, atol=1e-4)
 
 
-def test_clock_maps_are_inverse():
-    sim = simulate(SimConfig(skew=1e-2), seed=0)
-    T = sim.truth.T
-    t = sim.truth.t
-    np.testing.assert_allclose(T - t, sim.truth.beta / C, atol=1e-15)
+def test_clock_truth_follows_skew():
+    sim = simulate(SimConfig(clock=SCENARIOS["gaussian_skew"], duration=2.0), seed=4)
+    d_delta = np.diff(sim.truth.delta)
+    expected = -sim.truth.rho[:-1] * np.diff(sim.truth.T)
+    assert np.abs(d_delta - expected).max() < 2e-10  # white offset noise, sigma 2e-11 per step
+    ideal = simulate(SimConfig(clock=SCENARIOS["ideal_clock"], duration=2.0), seed=4)
+    assert np.ptp(ideal.truth.delta) == 0.0 and np.all(ideal.truth.rho == 0.0)
 
 
-def test_uwb_timestamps_match_clock_for_negative_offset():
-    # Negative offsets start the tag clock after t = 0; early packets must be dropped, not clamped.
-    for seed in range(20):
-        sim = simulate(replace(NOISELESS, max_offset=1e-3), seed)
-        if sim.truth.beta[0] < 0:
-            break
-    clock_T, clock_t = sim.truth.T, sim.truth.t
-    inside = sim.uwb.t_rx_true <= clock_t[-1]
-    expected = np.interp(sim.uwb.t_rx_true[inside], clock_t, clock_T)
-    assert sim.uwb.t_rx_true.min() >= clock_t[0]
-    np.testing.assert_allclose(sim.uwb.T_rx[inside], expected, atol=1e-15)
-
-
-def test_uwb_receptions_satisfy_light_time():
-    sim = simulate(NOISELESS, seed=1)
-    uwb = sim.uwb
-    traj = CircleTrajectory(NOISELESS.speed, NOISELESS.radius, NOISELESS.height)
-    rng = np.linalg.norm(traj.position(uwb.t_rx_true) - sim.anchors[uwb.anchor], axis=-1)
-    np.testing.assert_allclose(C * (uwb.t_rx_true - uwb.t_tx), rng, atol=1e-6)
-
-
-def _dead_reckon(sim, coupled):
-    """Integrate noiseless IMU from the true initial state; return final position error."""
-    x = truth_state(sim.truth, 0)
-    for k in range(len(sim.imu.T)):
-        x, _ = propagate(x, sim.imu.gyro[k], sim.imu.accel[k], sim.imu.dT, coupled)
-    final = truth_state(sim.truth, len(sim.imu.T) - 1)
-    # x is one step past the last truth sample; step the truth forward analytically.
-    traj = CircleTrajectory(sim.config.speed, sim.config.radius, sim.config.height)
-    t_end = sim.truth.t[-1] + sim.imu.dT * (1 - final.gamma / C)
-    return np.linalg.norm(x.p - traj.position(t_end))
-
-
-def test_coupled_dead_reckoning_tracks_truth_with_large_skew():
-    sim = simulate(NOISELESS, seed=2)
-    assert _dead_reckon(sim, coupled=True) < 1e-3
-
-
-def test_decoupled_dead_reckoning_drifts_with_large_skew():
-    sim = simulate(NOISELESS, seed=2)
-    assert _dead_reckon(sim, coupled=False) > 10 * _dead_reckon(sim, coupled=True)
-
-
-def test_decoupled_matches_coupled_without_skew():
-    sim = simulate(replace(NOISELESS, skew=0.0), seed=3)
-    assert abs(_dead_reckon(sim, coupled=False) - _dead_reckon(sim, coupled=True)) < 1e-9
+@pytest.mark.parametrize("cls", [Ekf, Eqf])
+def test_filters_track_a_short_flight(cls):
+    config = SimConfig(speed=2.0, clock=SCENARIOS["gaussian_skew"], duration=6.0)
+    sim = simulate(config, seed=5)
+    P0 = prior_covariance()
+    x0 = initial_estimate(truth_estimate(sim.truth, 0), P0, np.random.default_rng(6))
+    noise = FilterNoise(sim.imu_noise, sim.clock_noise, config.sigma_range)
+    run = run_filter(sim, cls, x0, P0, noise, record_every=20)
+    m = summarize_run(run, warmup=2.0)
+    assert m["pos_rmse"] < 0.1
+    assert m["offset_rmse_m"] < 0.1
+    assert 0.3 < m["nees_full"] < 3.0
+    assert 0.3 < m["nees_native"] < 3.0

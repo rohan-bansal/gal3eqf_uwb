@@ -1,4 +1,13 @@
-"""Listen-only UWB: anchors broadcast, the tag timestamps receptions on its own clock."""
+"""Tag-transmit UWB with synchronized anchors.
+
+The tag transmits on a schedule in its own clock. Every anchor timestamps the
+arrival in network time, which synchronized anchors share and which we take as
+true time. Anchors are static, so the arrival is exactly t_tx + range / C.
+
+Measurements are stored in metres relative to the known transmit time:
+    y_i = C (t_rx,i - T_tx) = C delta + |p_tag - a_i| + noise,
+where delta = t - T (network minus tag time) at the transmission.
+"""
 
 from dataclasses import dataclass
 
@@ -6,42 +15,26 @@ import numpy as np
 
 from gal3uwb.params import C
 
-_LIGHT_TIME_ITERS = 3  # fixed-point iterations; each shrinks the error by ~v/c
-
 
 @dataclass(frozen=True)
 class UwbData:
-    T_rx: np.ndarray  # tag-clock reception timestamps, with noise [s]
-    anchor: np.ndarray  # anchor index per reception
-    t_tx: np.ndarray  # transmit timestamps as reported by the anchors [s]
-    t_rx_true: np.ndarray  # true reception times, for diagnostics [s]
+    T_tx: np.ndarray  # (J,) transmit times in tag time [s]
+    y: np.ndarray  # (J, N) C (t_rx - T_tx) per anchor [m]
+    anchors: np.ndarray  # (N, 3) [m]
+    sigma: float  # timestamp noise in metres [m]
 
 
-def box_anchors(half_x=3.0, half_y=3.0, z_low=0.2, z_high=2.8):
-    """Eight anchors at the corners of a room-sized box."""
-    xs, ys, zs = (-half_x, half_x), (-half_y, half_y), (z_low, z_high)
-    return np.array([[x, y, z] for z in zs for x in xs for y in ys])
+def box_anchors(half_width=3.0, z_low=0.2, z_high=2.8):
+    """Eight anchors on the corners of a box around the flight volume."""
+    s = half_width
+    return np.array([[x, y, z] for z in (z_low, z_high) for x in (-s, s) for y in (-s, s)])
 
 
-def simulate_uwb(traj, clock, anchors, rate, duration, sigma_range, rng, anchor_offsets=None, anchor_skews=None):
-    """Round-robin broadcasts at `rate` Hz aggregate, in true time from t = 0.
-
-    Anchor clocks are synchronized (to true time) unless offsets/skews are given;
-    they only change the transmit timestamps the anchors report.
-    """
-    n_anchors = len(anchors)
-    t_tx = np.arange(int(duration * rate)) / rate
-    anchor = np.arange(len(t_tx)) % n_anchors
-    a = anchors[anchor]
-
-    t_rx = t_tx + np.linalg.norm(traj.position(t_tx) - a, axis=-1) / C
-    for _ in range(_LIGHT_TIME_ITERS):
-        t_rx = t_tx + np.linalg.norm(traj.position(t_rx) - a, axis=-1) / C
-
-    keep = clock.covers(t_rx)  # drop receptions before the tag clock starts
-    t_tx, anchor, t_rx = t_tx[keep], anchor[keep], t_rx[keep]
-    T_rx = clock.tag_time(t_rx) + rng.normal(0.0, sigma_range / C, len(t_rx))
-    offsets = np.zeros(n_anchors) if anchor_offsets is None else np.asarray(anchor_offsets)
-    skews = np.zeros(n_anchors) if anchor_skews is None else np.asarray(anchor_skews)
-    t_tx_reported = t_tx + offsets[anchor] + skews[anchor] * t_tx
-    return UwbData(T_rx, anchor, t_tx_reported, t_rx)
+def simulate_uwb(traj, clock, T_tx, anchors, lever_arm, sigma, rng):
+    """Arrival times at every anchor for each tag transmission at tag times T_tx."""
+    delta = -clock.offset(T_tx)
+    t_tx = T_tx + delta
+    p_tag = traj.position(t_tx) + traj.rotation(t_tx) @ lever_arm
+    ranges = np.linalg.norm(p_tag[:, None, :] - anchors[None, :, :], axis=-1)
+    y = C * delta[:, None] + ranges + rng.normal(0.0, sigma, ranges.shape)
+    return UwbData(T_tx, y, anchors, sigma)

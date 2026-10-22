@@ -1,46 +1,65 @@
 # gal3uwb
 
-Galilean equivariant filtering for listen-only (TDoA) UWB + IMU localization.
+Galilean equivariant filtering for UWB + IMU drone localization, where the tag's
+clock offset is the Galilean time coordinate and its skew is the time-rate bias.
 The proposal and design discussion are in [`doc/`](doc/).
+
+The current setup follows the plan agreed after the coupling check (commit
+`953f5b6`): the tag on the drone transmits and every anchor timestamps the
+arrival. Steps 1 and 2 use synchronized anchors.
 
 ## Setup
 
 ```bash
-uv sync            # creates .venv with gtsam 4.3.0 (PyPI wheel, includes Gal3)
-uv run pytest      # smoke tests: GTSAM install and Gal3 conventions
+uv sync                                   # .venv with gtsam 4.3.0 (PyPI wheel, includes Gal3)
+uv run pytest                             # Lie group, Jacobian and simulator tests
+python scripts/download_miluv.py          # MILUV sensor CSVs only (~0.74 GB of 186 GB)
 ```
+
+Run experiments through Slurm (`slurm/experiment.sbatch`), not on the login node.
 
 ## Layout
 
 ```
 src/gal3uwb/
-  sim/        trajectories, IMU, device clocks, UWB timestamps
-  filters/    Galilean EqF and EKF baselines
-  eval/       Monte Carlo harness, RMSE / NEES
-experiments/  runnable scripts, one per study
+  gal3.py     Gal(3) and its tangent group Gal(3) x| gal(3)
+  sim/        trajectories, IMU, tag clock, tag-transmit UWB with synchronized anchors
+  filters/    EqF on Gal(3) x| gal(3) (Delama et al.) and the SE2(3) EKF baseline
+  data/       MILUV loader: real path and IMU with simulated UWB on top
+  eval/       filter runner, RMSE and NEES
+experiments/  runnable studies
+scripts/      data download
 tests/
 results/      generated outputs (gitignored)
+data/         downloaded datasets (gitignored)
 ```
 
 ## Experiments
 
-- `experiments/coupling_check.py`: paired Monte Carlo test of whether the
-  Galilean clock-rate coupling matters for UWB. Two filters that differ only in
-  integrating the IMU over true time vs. tag time, swept over speed and skew.
-  Writes `results/coupling_check/{summary.csv,runs.npz,coupling_check.png}`;
-  `--replot` redraws from saved results.
+- `experiments/synced_anchors.py`: steps 1 and 2 on synthetic circle flights at
+  0, 0.5, 2 and 5 m/s. Step 1 is an ideal tag clock (unknown constant offset);
+  step 2 draws the skew from N(0, 20 ppm^2) per flight and adds TCXO noise.
+  Both filters run on the same data from the same initial estimate.
+- `experiments/miluv_synced.py`: the same comparison on ten single-drone MILUV
+  flights, with the real mocap path and PX4 IMU and simulated UWB at MILUV's
+  anchor and tag positions.
+- `experiments/eqf_tuning.py`: sensitivity of the EqF to the prior on its
+  virtual velocity-input bias and to the initial uncertainty.
 
-## Simulator conventions
+Each writes a `summary.csv`, the raw runs and figures under `results/<name>/`.
 
-- Tag time `T`, true (network) time `t`, offset `tau = T - t`, skew `dtau/dT`.
-  Filters run on `T`; clock states are in metres (`beta = C tau`, `gamma = C skew`).
-- Anchors are synchronized to true time by default (per-anchor offsets/skews are
-  supported but zero). IMU and UWB share the tag clock.
+## Conventions
 
-## Gal3 conventions in GTSAM
+- Tag time `T`, network time `t`. The filters estimate `delta = t - T` [s] and the
+  time-rate bias `rho` (the tag skew), with `d(delta)/dT = -rho`.
+- A transmission at tag time `T_tx` reaches anchor `i` at network time
+  `t_rx,i`; the filters use `y_i = C (t_rx,i - T_tx) = C delta + |p_tag - a_i|`.
+- EqF state: `F = (R, v_F, p_F, delta)` in Gal(3) is the drone frame relative to
+  the Earth frame at the same network time, so `v = v_F + g delta` and
+  `p = p_F + g delta^2 / 2`. Biases `(b_omega, b_a, b_nu, b_rho)` live in gal(3);
+  `b_nu` is virtual (zero in truth).
+- Both filters are compared in the same physical error coordinates
+  (`filters/common.py`); "native" NEES uses each filter's own error definition.
 
-Checked in `tests/test_environment.py`:
-
-- Constructor: `Gal3(R, p, v, t)`, with position before velocity.
-- Tangent vector (Expmap/Logmap): `[omega(0:3), v(3:6), p(6:9), t(9)]`, with velocity before position.
-- Matrix: `[[R, v, p], [0, 1, t], [0, 0, 1]]`.
+GTSAM's Gal3 conventions (checked in `tests/test_environment.py`): constructor
+`Gal3(R, p, v, t)`; tangent `[omega, v, p, t]`; matrix `[[R, v, p], [0, 1, t], [0, 0, 1]]`.
