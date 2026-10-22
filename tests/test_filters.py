@@ -63,8 +63,9 @@ def test_ekf_range_jacobian():
 def _eqf(F, b):
     f = eqf.Eqf.__new__(eqf.Eqf)
     f.F, f.b, f.noise = F.copy(), b.copy(), NOISE
+    f.ac, f.ak = np.zeros(0), np.zeros(0)
     f.P = np.eye(eqf.DIM)
-    f.q_input, f.q_walk = np.zeros(10), np.zeros(10)
+    f.S = np.zeros((eqf.DIM, eqf.DIM))
     return f
 
 
@@ -88,7 +89,6 @@ def _eqf_state():
 def _eqf_linearization():
     f = _eqf_state()
     f.P = np.zeros((eqf.DIM, eqf.DIM))
-    f.q_input, f.q_walk = np.ones(10), np.ones(10)
     # Recover A from propagating P = basis outer products is awkward; rebuild it directly.
     F, b = f.F, f.b
     u = np.r_[GYRO, ACCEL, 0.0, 0.0, 0.0, 1.0] - b
@@ -106,7 +106,7 @@ def test_eqf_propagation_matches_filter_code():
     f, A, B_input = _eqf_linearization()
     P0 = np.diag(RNG.uniform(0.5, 2.0, 20))
     g = _eqf_state()
-    g.P, g.q_input, g.q_walk = P0.copy(), np.zeros(10), np.zeros(10)
+    g.P = P0.copy()
     g.propagate(GYRO, ACCEL, DT)
     np.testing.assert_allclose(g.P, A @ P0 @ A.T, atol=1e-12)
 
@@ -184,3 +184,57 @@ def test_update_reduces_error_on_noiseless_measurement(cls):
     for _ in range(3):
         f.update(y, anchors, LEVER)
     assert np.linalg.norm(f.estimate().p - truth.p) < 0.1 * before
+
+
+# --- Free-running anchors ---------------------------------------------------------
+
+ANCHORS4 = np.array([[3.0, 3.0, 2.8], [-3.0, 3.0, 0.2], [3.0, -3.0, 0.2], [-3.0, -3.0, 2.8]])
+
+
+def _state_with_anchors():
+    x = _state()
+    return Estimate(x.R, x.v, x.p, x.gyro_bias, x.accel_bias, x.delta, x.rho, np.array([3e-4, -2e-4, 5e-4]),
+                    np.array([1e-5, -3e-5, 2e-5]))
+
+
+def test_clock_noise_covariance_matches_device_noise():
+    from gal3uwb.filters.common import clock_noise_covariance
+
+    n, q_o, q_s = 3, 2e-19, 5e-19
+    # Device noise [tau, o_0..o_n, s_tag, s_0..s_n] -> [delta, rho, Delta_1..n, kappa_1..n].
+    M = np.zeros((2 + 2 * n, 2 * (n + 2)))
+    M[0, 1], M[0, 0] = 1.0, -1.0  # delta = o_0 - tau
+    M[1, n + 2], M[1, n + 3] = 1.0, -1.0  # rho = s_tag - s_0
+    for i in range(1, n + 1):
+        M[1 + i, 1 + i], M[1 + i, 1] = 1.0, -1.0  # Delta_i = o_i - o_0
+        M[1 + n + i, n + 3 + i], M[1 + n + i, n + 3] = 1.0, -1.0  # kappa_i = s_i - s_0
+    D = np.diag(np.r_[np.full(n + 2, q_o), np.full(n + 2, q_s)])
+    np.testing.assert_allclose(clock_noise_covariance(ClockNoise(q_o, q_s), n), M @ D @ M.T, rtol=1e-12)
+
+
+def test_ekf_transition_matrix_with_anchor_clocks():
+    x = _state_with_anchors()
+    x_new, F, _ = ekf.propagate(x, GYRO, ACCEL, DT)
+    num = _numeric_jacobian(lambda e: x_new.error_to(ekf.propagate(x.retract(e), GYRO, ACCEL, DT)[0]), x.dim, 1e-6)
+    np.testing.assert_allclose(F, num, atol=1e-7)
+
+
+@pytest.mark.parametrize("cls", [ekf.Ekf, eqf.Eqf])
+def test_range_and_sync_jacobians_with_anchor_clocks(cls):
+    """Both filters' Jacobians, mapped to physical coordinates, match finite differences
+    of the physical measurement model."""
+    x = _state_with_anchors()
+    f = cls(x, np.eye(x.dim) * 1e-4, NOISE)
+    J = np.eye(x.dim) if cls is ekf.Ekf else np.linalg.inv(eqf.physical_jacobian(f.F, f.b, 3))[:, :x.dim]
+    step = np.r_[np.full(15, 1e-3), 1e-12, 1e-3, np.full(3, 1e-12), np.full(3, 1e-3)]
+    _, H = f.range_model(ANCHORS4, LEVER) if cls is eqf.Eqf else ekf.range_model(x, ANCHORS4, LEVER)
+    num = _numeric_jacobian(lambda e: ekf.range_model(x.retract(e), ANCHORS4, LEVER)[0], x.dim, step)
+    np.testing.assert_allclose(H @ J, num, rtol=1e-5, atol=1e-5)
+    for tx in (0, 2):
+        offsets = ekf.anchor_offsets(x, 4)
+        cols = ekf.anchor_columns(x, 4) if cls is ekf.Ekf else f._anchor_columns(4)
+        _, H, _ = ekf.sync_model(len(f.P), offsets, cols, tx, ANCHORS4)
+        num = _numeric_jacobian(
+            lambda e: ekf.sync_model(x.dim, ekf.anchor_offsets(x.retract(e), 4), ekf.anchor_columns(x, 4), tx,
+                                     ANCHORS4)[0], x.dim, step)
+        np.testing.assert_allclose(H @ J, num, rtol=1e-5, atol=1e-5)

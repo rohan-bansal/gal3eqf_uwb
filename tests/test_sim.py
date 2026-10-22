@@ -46,3 +46,50 @@ def test_filters_track_a_short_flight(cls):
     assert m["offset_rmse_m"] < 0.1
     assert 0.3 < m["nees_full"] < 3.0
     assert 0.3 < m["nees_native"] < 3.0
+
+
+def _interp_truth(sim, T):
+    """Truth at an arbitrary tag time, linearly interpolated between IMU instants."""
+    i = np.searchsorted(sim.truth.T, T)
+    w = (T - sim.truth.T[i - 1]) / (sim.truth.T[i] - sim.truth.T[i - 1])
+    x0, x1 = truth_estimate(sim.truth, i - 1), truth_estimate(sim.truth, i)
+    return x0.retract(w * x0.error_to(x1))
+
+
+def test_unsynced_measurements_match_truth():
+    config = SimConfig(speed=2.0, clock=SCENARIOS["unsynced"], duration=3.0, sigma_range=0.0)
+    sim = simulate(config, seed=7)
+    assert sim.truth.anchor_offset.shape[1] == len(sim.uwb.anchors) - 1
+    j = 30
+    y, _ = range_model(_interp_truth(sim, sim.uwb.T_tx[j]), sim.uwb.anchors, sim.lever_arm)
+    np.testing.assert_allclose(sim.uwb.y[j], y, atol=1e-3)
+    from gal3uwb.filters.ekf import anchor_columns, anchor_offsets, sync_model
+
+    for m in (5, 77):
+        x = _interp_truth(sim, sim.sync.T[m])
+        n = len(sim.uwb.anchors)
+        h, _, rx = sync_model(x.dim, anchor_offsets(x, n), anchor_columns(x, n), sim.sync.tx[m], sim.uwb.anchors)
+        np.testing.assert_allclose(sim.sync.y[m][rx], h, atol=1e-3)
+        assert np.isnan(sim.sync.y[m][sim.sync.tx[m]])
+
+
+def test_unsynced_clock_truth_follows_skews():
+    sim = simulate(SimConfig(clock=SCENARIOS["unsynced"], duration=2.0), seed=8)
+    dT = np.diff(sim.truth.T)[:, None]
+    np.testing.assert_allclose(np.diff(sim.truth.anchor_offset, axis=0), sim.truth.anchor_skew[:-1] * dT, atol=3e-10)
+    np.testing.assert_allclose(np.diff(sim.truth.delta), -sim.truth.rho[:-1] * dT[:, 0], atol=3e-10)
+
+
+@pytest.mark.parametrize("cls", [Ekf, Eqf])
+def test_filters_track_a_short_unsynced_flight(cls):
+    config = SimConfig(speed=2.0, clock=SCENARIOS["unsynced"], duration=6.0)
+    sim = simulate(config, seed=9)
+    n = sim.truth.anchor_offset.shape[1]
+    P0 = prior_covariance(n=n)
+    x0 = initial_estimate(truth_estimate(sim.truth, 0), P0, np.random.default_rng(10))
+    noise = FilterNoise(sim.imu_noise, sim.clock_noise, config.sigma_range)
+    m = summarize_run(run_filter(sim, cls, x0, P0, noise, record_every=20), warmup=2.0)
+    assert m["pos_rmse"] < 0.1
+    assert m["anchor_offset_rmse_m"] < 0.1
+    assert 0.3 < m["nees_full"] < 3.0
+    assert 0.3 < m["nees_native"] < 3.0

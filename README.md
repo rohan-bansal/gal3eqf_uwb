@@ -6,7 +6,8 @@ The proposal and design discussion are in [`doc/`](doc/).
 
 The current setup follows the plan agreed after the coupling check (commit
 `953f5b6`): the tag on the drone transmits and every anchor timestamps the
-arrival. Steps 1 and 2 use synchronized anchors.
+arrival. Steps 1 and 2 use synchronized anchors; step 3 gives every anchor its
+own clock and has the anchors exchange packets so their clocks stay observable.
 
 ## Setup
 
@@ -36,11 +37,13 @@ data/         downloaded datasets (gitignored)
 
 ## Experiments
 
-- `experiments/synced_anchors.py`: steps 1 and 2 on synthetic circle flights at
-  0, 0.5, 2 and 5 m/s. Step 1 is an ideal tag clock (unknown constant offset);
-  step 2 draws the skew from N(0, 20 ppm^2) per flight and adds TCXO noise.
-  Both filters run on the same data from the same initial estimate.
-- `experiments/miluv_synced.py`: the same comparison on ten single-drone MILUV
+- `experiments/synthetic.py`: synthetic circle flights at 0, 0.5, 2 and 5 m/s.
+  Step 1 (`ideal_clock`) is an ideal tag clock with an unknown constant offset;
+  step 2 (`gaussian_skew`) draws the skew from N(0, 20 ppm^2) per flight and adds
+  TCXO noise; step 3 (`unsynced`) adds a TCXO clock per anchor and
+  anchor-to-anchor packets at 10 Hz per anchor. Every filter runs on the same
+  data from the same initial estimate.
+- `experiments/miluv.py`: the same comparison on ten single-drone MILUV
   flights, with the real mocap path and PX4 IMU and simulated UWB at MILUV's
   anchor and tag positions.
 - `experiments/eqf_tuning.py`: sensitivity of the EqF to the prior on its
@@ -58,6 +61,11 @@ Each writes a `summary.csv`, the raw runs and figures under `results/<name>/`.
   the Earth frame at the same network time, so `v = v_F + g delta` and
   `p = p_F + g delta^2 / 2`. Biases `(b_omega, b_a, b_nu, b_rho)` live in gal(3);
   `b_nu` is virtual (zero in truth).
+- Step 3: anchor 0 is the network reference, so `delta = A_0 - T`; the other
+  anchors carry `Delta_i = A_i - A_0` and skews `kappa_i` as additive states (a
+  direct product with Gal(3) x| gal(3) in the EqF). Their noise is correlated
+  through anchor 0's clock. Anchor-to-anchor packets give
+  `C (A_j,rx - A_i,tx) = C (Delta_j - Delta_i) + |a_j - a_i|`.
 - Both filters are compared in the same physical error coordinates
   (`filters/common.py`); "native" NEES uses each filter's own error definition.
 

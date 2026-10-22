@@ -1,7 +1,7 @@
-"""Steps 1 and 2 on real MILUV flights: EqF on Gal(3) vs EKF.
+"""EqF on Gal(3) vs EKF on real MILUV flights, for the three clock scenarios.
 
-The drone path (mocap) and the PX4 IMU are real; the tag clock and the
-synchronized-anchor timestamps are simulated at MILUV's own anchor and tag
+The drone path (mocap) and the PX4 IMU are real; the tag clock, anchor clocks
+(for step 3) and all timestamps are simulated at MILUV's own anchor and tag
 positions. Each (flight, scenario, seed) draws a new clock, timestamp noise and
 initial estimate, and runs every filter on the same data.
 
@@ -11,7 +11,9 @@ calibration. The bias "truth" is a sliding-window estimate against mocap, so
 consistency is judged on position, velocity and clock ("pvc"); the mocap
 attitude also carries a few degrees of IMU-to-body mounting tilt.
 
-    sbatch slurm/experiment.sbatch experiments/miluv_synced.py
+    sbatch slurm/experiment.sbatch experiments/miluv.py --scenarios unsynced --out results/miluv_step3
+
+Steps 1-2 in results/miluv_steps12 were run with --nu-loose 1e-2.
 """
 
 import argparse
@@ -46,9 +48,10 @@ FLIGHTS = [
     "default_1_circular3D_0", "default_1_remoteControlLowPace_0", "default_1_remoteControlLowPace_0_v2",
     "default_1_remoteControlHighPace_0", "default_1_remoteControlHighPace_1", "default_1_remoteControlHighPace_2",
 ]
-FILTERS = {"EKF": (Ekf, {}), "EqF": (Eqf, {"nu_sigma0": 1e-4}), "EqF-loose": (Eqf, {"nu_sigma0": 1e-2})}
-FILTER_LABELS = {"EKF": "EKF", "EqF": "EqF, b_nu prior 1e-4", "EqF-loose": "EqF, b_nu prior 1e-2"}
-SCENARIO_LABELS = {"ideal_clock": "step 1: ideal clock", "gaussian_skew": "step 2: Gaussian skew"}
+FILTERS = {"EKF": Ekf, "EqF": Eqf, "EqF-loose": Eqf}
+NU_TIGHT = 1e-4
+SCENARIO_LABELS = {"ideal_clock": "step 1: ideal clock", "gaussian_skew": "step 2: Gaussian skew",
+                   "unsynced": "step 3: unsynced anchors"}
 UWB_RATE = 20.0  # [Hz]
 SIGMA_RANGE = 0.1  # [m]
 WARMUP = 10.0  # [s]
@@ -57,7 +60,12 @@ RECORD_EVERY = 25  # IMU steps between records (10 Hz at 250 Hz)
 # apparent accel bias (bias plus mounting tilt), which cannot be calibrated at rest.
 PRIOR = {**INITIAL_SIGMA, "pos": 0.1, "gyro_bias": 0.005, "accel_bias": 0.5}
 METRICS = ("pos_rmse", "pos_h_rmse", "pos_v_rmse", "vel_rmse", "rot_rmse_deg", "yaw_rmse_deg", "offset_rmse_m",
-           "nees_pvc", "nees_native", "nees_full", "nees_rot", "nees_yaw", "nees_vel", "nees_pos", "nees_clock")
+           "anchor_offset_rmse_m", "nees_pvc", "nees_native", "nees_full", "nees_rot", "nees_yaw", "nees_vel",
+           "nees_pos", "nees_clock", "nees_anchors")
+
+
+def filter_labels(nu_loose):
+    return {"EKF": "EKF", "EqF": f"EqF, b_nu prior {NU_TIGHT:g}", "EqF-loose": f"EqF, b_nu prior {nu_loose:g}"}
 
 _FLIGHTS = {}
 
@@ -82,18 +90,19 @@ def _load_cache(path):
 
 
 def run_task(task):
-    name, scenario, seed = task
+    name, scenario, seed, nu_loose = task
     entry = _FLIGHTS[name]
     clock = SCENARIOS[scenario]
     sim = simulate_on_flight(entry["flight"], clock, UWB_RATE, SIGMA_RANGE, seed, biases=entry["biases"])
     sim = replace(sim, imu_noise=entry["imu_noise"])
-    P0 = prior_covariance(PRIOR)
+    P0 = prior_covariance(PRIOR, sim.truth.anchor_offset.shape[1])
     x0 = initial_estimate(truth_estimate(sim.truth, 0), P0, np.random.default_rng(seed + 1_000_000))
     x0 = replace(x0, gyro_bias=entry["gyro_bias0"])
     noise = FilterNoise(sim.imu_noise, sim.clock_noise, SIGMA_RANGE)
+    nu = {"EKF": NU_TIGHT, "EqF": NU_TIGHT, "EqF-loose": nu_loose}
     out = {}
-    for fname, (cls, overrides) in FILTERS.items():
-        run = run_filter(sim, cls, x0, P0, replace(noise, **overrides), record_every=RECORD_EVERY)
+    for fname, cls in FILTERS.items():
+        run = run_filter(sim, cls, x0, P0, replace(noise, nu_sigma0=nu[fname]), record_every=RECORD_EVERY)
         out[fname] = {"metrics": summarize_run(run, WARMUP), "T": run.T - run.T[0],
                       "nees_pvc": run.nees["pvc"] / 8, "nees_yaw": run.nees_yaw}
     return name, scenario, seed, out
@@ -103,9 +112,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--seeds", type=int, default=8)
     parser.add_argument("--flights", nargs="+", default=FLIGHTS)
+    parser.add_argument("--nu-loose", type=float, default=3e-3, help="b_nu prior of the second EqF [m/s]")
     parser.add_argument("--scenarios", nargs="+", default=list(SCENARIOS), choices=list(SCENARIOS))
     parser.add_argument("--workers", type=int, default=min(16, os.cpu_count() or 1))
-    parser.add_argument("--out", type=Path, default=Path("results/miluv_synced"))
+    parser.add_argument("--out", type=Path, default=Path("results/miluv"))
     parser.add_argument("--replot", action="store_true")
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
@@ -126,7 +136,7 @@ def main():
             print(f"  {name:38s} speed mean/p95/max {e['speed'][0]:.2f}/{e['speed'][1]:.2f}/{e['speed'][2]:.2f} m/s, "
                   f"airborne IMU noise gyro {n.gyro_nd:.1e} accel {n.accel_nd:.1e}", flush=True)
 
-        tasks = [(n, s, seed) for n in args.flights for s in args.scenarios for seed in range(args.seeds)]
+        tasks = [(n, s, seed, args.nu_loose) for n in args.flights for s in args.scenarios for seed in range(args.seeds)]
         print(f"{len(tasks)} runs x {len(FILTERS)} filters on {args.workers} workers", flush=True)
         results = []
         with Pool(args.workers, initializer=_load_cache, initargs=(cache,)) as pool:
@@ -135,7 +145,7 @@ def main():
                 if done % max(1, len(tasks) // 10) == 0:
                     print(f"  {done}/{len(tasks)} runs ({time.time() - t0:.0f} s)", flush=True)
         saved = {"results": results, "speed": {n: e["speed"] for n, e in flights.items()},
-                 "flights": args.flights, "scenarios": args.scenarios, "seeds": args.seeds}
+                 "flights": args.flights, "scenarios": args.scenarios, "seeds": args.seeds, "nu_loose": args.nu_loose}
         with open(args.out / "runs.pkl", "wb") as f:
             pickle.dump(saved, f)
 
@@ -155,7 +165,7 @@ def summarize(saved):
                 row = {"flight": name, "scenario": scenario, "filter": fname,
                        "speed_mean": saved["speed"][name][0], "speed_p95": saved["speed"][name][1]}
                 for m in METRICS:
-                    vals = np.array([x[m] for x in ms])
+                    vals = np.array([x.get(m, np.nan) for x in ms])  # anchor metrics exist only for step 3
                     row[m] = np.sqrt(np.mean(vals**2)) if "rmse" in m else np.mean(vals)
                 table.append(row)
     return table
@@ -171,14 +181,15 @@ def write_csv(table, path):
 
 
 def print_table(table):
-    print(f"\n{'flight':>36} {'scenario':>13} {'filter':>9} {'v':>4} | {'h cm':>5} {'z cm':>5} {'yaw deg':>7} {'offs cm':>7} | "
-          f"{'navclk':>6} {'native':>6} {'rot':>5} {'yaw':>5} {'vel':>5} {'pos':>5} {'clock':>5}")
+    print(f"\n{'flight':>36} {'scenario':>13} {'filter':>9} {'v':>4} | {'h cm':>5} {'z cm':>5} {'yaw deg':>7} "
+          f"{'offs cm':>7} {'anch cm':>7} | {'pvc':>6} {'native':>6} {'rot':>5} {'yaw':>5} {'vel':>5} {'pos':>5} "
+          f"{'clock':>5} {'anch':>5}")
     for r in table:
         print(f"{r['flight']:>36} {r['scenario']:>13} {r['filter']:>9} {r['speed_mean']:4.2f} | "
               f"{100 * r['pos_h_rmse']:5.1f} {100 * r['pos_v_rmse']:5.1f} {r['yaw_rmse_deg']:7.2f} "
-              f"{100 * r['offset_rmse_m']:7.2f} | "
+              f"{100 * r['offset_rmse_m']:7.2f} {100 * r['anchor_offset_rmse_m']:7.2f} | "
               f"{r['nees_pvc']:6.2f} {r['nees_native']:6.2f} {r['nees_rot']:5.2f} {r['nees_yaw']:5.2f} "
-              f"{r['nees_vel']:5.2f} {r['nees_pos']:5.2f} {r['nees_clock']:5.2f}")
+              f"{r['nees_vel']:5.2f} {r['nees_pos']:5.2f} {r['nees_clock']:5.2f} {r['nees_anchors']:5.2f}")
 
 
 FILTER_COLORS = {"EKF": "#2a78d6", "EqF": "#eb6834", "EqF-loose": "#1baf7a"}
@@ -225,7 +236,8 @@ def plot(saved, table, path):
     handles = [plt.Line2D([], [], ls="none", marker="o", ms=6, color=c) for c in FILTER_COLORS.values()]
     handles += [plt.Line2D([], [], ls="none", marker=m, ms=6, color=INK_2, mfc=mfc, mew=1.5)
                 for m, mfc in (("o", INK_2), ("D", SURFACE))][: len(scenarios)]
-    labels = [FILTER_LABELS[n] for n in FILTER_COLORS] + [SCENARIO_LABELS[s] for s in scenarios]
+    names = filter_labels(saved.get("nu_loose", 1e-2))  # older runs used 1e-2
+    labels = [names[n] for n in FILTER_COLORS] + [SCENARIO_LABELS[s] for s in scenarios]
     fig.legend(handles, labels, loc="lower center", ncol=len(labels), frameon=False, fontsize=8, labelcolor=INK)
     fig.suptitle("MILUV flights (real path and IMU) with simulated synchronized-anchor UWB", x=0.01, ha="left",
                  color=INK, fontsize=10)
