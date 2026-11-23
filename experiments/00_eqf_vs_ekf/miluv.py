@@ -11,7 +11,7 @@ calibration. The bias "truth" is a sliding-window estimate against mocap, so
 consistency is judged on position, velocity and clock ("pvc"); the mocap
 attitude also carries a few degrees of IMU-to-body mounting tilt.
 
-    sbatch slurm/experiment.sbatch experiments/miluv.py --scenarios unsynced --out results/miluv_step3
+    sbatch slurm/experiment.sbatch experiments/00_eqf_vs_ekf/miluv.py --scenarios unsynced --out results/miluv_step3
 
 Steps 1-2 in results/miluv_steps12 were run with --nu-loose 1e-2.
 """

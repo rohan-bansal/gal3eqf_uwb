@@ -1,0 +1,519 @@
+// Build gal3uwb_update.pptx in the current directory (build/), from build/img.
+// Layout: LAYOUT_WIDE (13.333 x 7.5 in), Arial, plain white.
+const fs = require('fs');
+const path = require('path');
+const pptxgen = require('pptxgenjs');
+const { applyTheme } = require(path.join(process.env.HOME,
+  '.claude/skills/synced/a1e1ea47-6147-4b0c-8258-d89a38b50227_3880d501-2c80-4180-8ffa-2ee964d7d248/pptx/scripts/apply_theme.js'));
+
+const IMG = path.resolve('img');
+const MAN = JSON.parse(fs.readFileSync(path.join(IMG, 'manifest.json'), 'utf8'));
+const REPORT = 'https://claude.ai/artifact/99n9r1YAuPoRj5mXPhsE8R';
+
+const THEME = {
+  name: 'Gal3 UWB', headFontFace: 'Arial', bodyFontFace: 'Arial',
+  colors: {
+    dk1: '1D2229', lt1: 'FFFFFF', dk2: '1F4E79', lt2: 'F3F5F8',
+    accent1: '2A78D6',  // EqF blue (report)
+    accent2: 'B8481A',  // EKF orange, text-safe shade (report)
+    accent3: '0F7A54',  // FEJ green, text-safe shade (report)
+    accent4: 'E6F0FB',  // EqF soft fill
+    accent5: 'C9CFD7',  // rules and borders
+    accent6: '6B7280',  // muted text
+    hlink: '2A78D6', folHlink: '5B4A9E',
+  },
+};
+
+const pres = new pptxgen();
+pres.layout = 'LAYOUT_WIDE';
+pres.theme = { headFontFace: 'Arial', bodyFontFace: 'Arial' };
+pres.title = 'Galilean EqF for UWB-IMU localization: update';
+pres.author = 'Rohan Bansal';
+const C = pres.SchemeColor;
+const INK = C.text1, NAVY = C.text2, PANEL = C.background2, EQF = C.accent1, EKF = C.accent2, FEJ = C.accent3,
+  EQF_SOFT = C.accent4, RULE = C.accent5, MUTED = C.accent6, WHITE = C.background1;
+const X0 = 0.6, CW = 12.133;   // left margin and content width
+
+// ---------- layouts ----------
+pres.defineSlideMaster({
+  title: 'TITLE', background: { color: WHITE },
+  objects: [
+    { placeholder: { options: { name: 'title', type: 'title', x: 0.8, y: 1.9, w: 11.7, h: 1.8, fontSize: 38, bold: true, color: NAVY, valign: 'bottom', align: 'left', margin: 0 }, text: '' } },
+    { placeholder: { options: { name: 'sub', type: 'body', x: 0.8, y: 4.0, w: 11.7, h: 0.5, fontSize: 22, color: INK, valign: 'top', margin: 0 }, text: '' } },
+    { placeholder: { options: { name: 'author', type: 'body', x: 0.8, y: 4.55, w: 11.7, h: 0.45, fontSize: 20, color: MUTED, valign: 'top', margin: 0 }, text: '' } },
+  ],
+});
+pres.defineSlideMaster({
+  title: 'CONTENT', background: { color: WHITE },
+  objects: [
+    { placeholder: { options: { name: 'kicker', type: 'body', x: X0, y: 0.3, w: CW, h: 0.32, fontSize: 14, bold: true, color: EQF, valign: 'top', margin: 0 }, text: '' } },
+    { placeholder: { options: { name: 'title', type: 'title', x: X0, y: 0.66, w: CW, h: 0.96, fontSize: 28, bold: true, color: NAVY, valign: 'top', align: 'left', margin: 0 }, text: '' } },
+  ],
+  slideNumber: { x: 12.23, y: 7.0, w: 0.5, h: 0.3, fontSize: 12, color: MUTED, align: 'right' },
+});
+
+// ---------- helpers ----------
+// Markup: **bold**, _{sub}, ^{sup}.
+function rich(s, base) {
+  const out = [];
+  let bold = false, last = 0, m;
+  const re = /(\*\*|_\{[^}]*\}|\^\{[^}]*\})/g;
+  const push = (t, extra) => { if (t) out.push({ text: t, options: Object.assign({}, base || {}, bold ? { bold: true } : {}, extra || {}) }); };
+  while ((m = re.exec(s))) {
+    push(s.slice(last, m.index));
+    const tok = m[0];
+    if (tok === '**') bold = !bold;
+    else if (tok[0] === '_') push(tok.slice(2, -1), { subscript: true });
+    else push(tok.slice(2, -1), { superscript: true });
+    last = re.lastIndex;
+  }
+  push(s.slice(last));
+  return out;
+}
+// Paragraphs from items (string or {t, bullet, gap, color, size}).
+function paras(items, o) {
+  o = o || {};
+  const runs = [];
+  items.forEach((it, k) => {
+    const item = typeof it === 'string' ? { t: it } : it;
+    const base = {};
+    if (item.color) base.color = item.color;
+    if (item.size) base.fontSize = item.size;
+    const r = rich(item.t, base);
+    if (!r.length) r.push({ text: ' ', options: {} });
+    const bullet = item.bullet !== undefined ? item.bullet : o.bullet;
+    r[0].options.bullet = bullet ? { indent: o.indent || 18 } : false;
+    r[0].options.paraSpaceAfter = item.gap !== undefined ? item.gap : (o.gap !== undefined ? o.gap : 6);
+    if (k < items.length - 1) r[r.length - 1].options.breakLine = true;
+    runs.push(...r);
+  });
+  return runs;
+}
+function text(slide, items, o) {
+  const runs = typeof items === 'string' ? rich(items) : paras(items, o);
+  slide.addText(runs, Object.assign({ isTextBox: true, margin: 0, valign: 'top', color: INK, fontSize: 18 }, o, { bullet: undefined, gap: undefined, indent: undefined }));
+}
+function head(slide, s, x, y, w, color) {
+  slide.addText(rich(s), { isTextBox: true, x, y, w, h: 0.34, margin: 0, fontSize: 18, bold: true, color: color || NAVY, valign: 'top' });
+}
+// Equation image at its rendered size (CSS px / 96 = inches), optionally scaled.
+const ALT = {
+  meas: 'y_ki = c (t_ki - T_k) = |p + R l - a_i| + c (delta + Delta_i) + n_ki',
+  state: 'x = (R, v, p, delta, b_omega, b_a, b_rho)',
+  Fmat: 'F = [[R, v_F, p_F], [0, 1, delta], [0, 0, 1]] in Gal(3)',
+  H: 'H_i = [ -u_i^T (p_F + R l)^ , delta u_i^T , u_i^T , c + delta u_i^T g | 0 ]',
+};
+function eq(slide, id, x, y, scale) {
+  const m = MAN['eq_' + id];
+  if (!m) throw new Error('missing equation ' + id);
+  const s = scale || 1, w = m.w / 96 * s, h = m.h / 96 * s;
+  slide.addImage({ path: path.join(IMG, 'eq_' + id + '.png'), x, y, w, h, altText: ALT[id] || ('Equation ' + id) });
+  return { w, h };
+}
+// Figure image: result charts are drawn in points (w / 72 in); report diagrams are scaled to width.
+function fig(slide, id, x, y, w, alt) {
+  const m = MAN[id];
+  const h = w * m.h / m.w;
+  slide.addImage({ path: path.join(IMG, id + '.png'), x, y, w, h, altText: alt });
+  return { w, h };
+}
+function cite(slide, s) {
+  slide.addText(rich(s), { isTextBox: true, x: X0, y: 7.0, w: 11.4, h: 0.3, margin: 0, fontSize: 12, color: MUTED, valign: 'top' });
+}
+function box(slide, x, y, w, h, fill, line) {
+  slide.addShape(pres.shapes.ROUNDED_RECTANGLE, { x, y, w, h, rectRadius: 0.06, fill: { color: fill || PANEL }, line: line ? { color: line, width: 1 } : { color: fill || PANEL, width: 0 } });
+}
+function content(kicker, title, section) {
+  const s = pres.addSlide({ masterName: 'CONTENT', sectionTitle: section });
+  s.addText(kicker, { placeholder: 'kicker' });
+  s.addText(title, { placeholder: 'title' });
+  return s;
+}
+
+// The report's section 3.4 figure as a strip of chips: what each scenario adds.
+const CHIPS = [
+  ['State', [['R, v, p', 1], ['δ, b_{ρ}', 1], ['b_{ω}, b_{a}, b_{ν}', 1], ['Δ_{i}, κ_{i} (anchor clocks)', 3], ['a_{i} (anchor positions)', 4]]],
+  ['Process noise', [['IMU and bias noise', 1], ['tag clock random walk', 2], ['anchor clock random walk', 3]]],
+  ['Updates', [['tag packets', 1], ['anchor packets', 3], ['both also update a_{i}', 4]]],
+];
+const DIMS = { 1: 'EqF 20 states · EKF 17', 2: 'EqF 20 states · EKF 17', 3: 'EqF 34 states · EKF 31', 4: 'EqF 58 states · EKF 55' };
+function chips(slide, step, y) {
+  const rowH = 0.32, gapY = 0.07, labW = 1.55, fs = 14;
+  CHIPS.forEach(([lab, items], r) => {
+    const yy = y + r * (rowH + gapY);
+    slide.addText(lab, { isTextBox: true, x: X0, y: yy, w: labW, h: rowH, margin: 0, fontSize: fs, color: MUTED, valign: 'middle' });
+    let x = X0 + labW;
+    items.forEach(([t, from]) => {
+      const shown = t.replace(/_\{([^}]*)\}/g, '$1');
+      const w = 0.3 + shown.length * 0.092 - (t.length - shown.length > 0 ? 0.05 : 0);
+      const off = from > step, isNew = step > 1 && from === step;
+      const wc = isNew ? w * 1.1 : w;   // bold text is wider
+      const runs = rich(t, { color: off ? MUTED : INK, bold: isNew });
+      slide.addText(runs, {
+        shape: pres.shapes.ROUNDED_RECTANGLE, rectRadius: 0.05, x, y: yy, w: wc, h: rowH, margin: 0,
+        fontSize: fs, align: 'center', valign: 'middle',
+        fill: { color: isNew ? EQF_SOFT : WHITE },
+        line: { color: isNew ? EQF : (off ? RULE : MUTED), width: isNew ? 1.5 : 0.75, dashType: off ? 'dash' : 'solid' },
+      });
+      x += wc + 0.12;
+    });
+  });
+  const yy = y + 2 * (rowH + gapY);
+  slide.addText(DIMS[step], { isTextBox: true, x: 8.9, y: yy, w: 3.83, h: rowH, margin: 0, fontSize: fs, bold: true, color: NAVY, align: 'right', valign: 'middle' });
+  return y + 3 * rowH + 2 * gapY;
+}
+
+// ===================================================================
+// 1. Title
+pres.addSection({ title: 'Title' });
+{
+  const s = pres.addSlide({ masterName: 'TITLE', sectionTitle: 'Title' });
+  s.addText('A Galilean equivariant filter for UWB–IMU drone localization', { placeholder: 'title' });
+  s.addText('Update meeting · November 2026', { placeholder: 'sub' });
+  s.addText('Rohan Bansal', { placeholder: 'author' });
+  s.addText([{ text: 'Full report: ', options: { color: MUTED } }, { text: REPORT.replace('https://', ''), options: { hyperlink: { url: REPORT }, color: EQF } }],
+    { isTextBox: true, x: 0.8, y: 6.55, w: 11.7, h: 0.35, margin: 0, fontSize: 14 });
+  s.addNotes('Update on the Galilean equivariant filter for UWB and IMU. I will first recap the problem and the filter, then go through the four scenarios one at a time: what changes in the filter, then the results. At the end, an overall table and conclusions. The full report is at the link.');
+}
+
+// ===================================================================
+pres.addSection({ title: 'Background' });
+// 2. Setup and measurement
+{
+  const s = content('Background', 'The tag on the drone sends UWB packets, and we keep the raw arrival times instead of differencing them', 'Background');
+  eq(s, 'meas', X0, 1.78);
+  const d = fig(s, 'sc1', X0, 2.6, 5.4, 'S1 scene from above: a tag sends packets to anchors; right, clock offsets over 30 s');
+  text(s, 'Report Figure 1 (S1): the amber tag sends to the anchors; right, clock offsets over 30 s.', { x: X0, y: 2.6 + d.h + 0.05, w: 5.4, h: 0.5, fontSize: 13, color: MUTED });
+  text(s, [
+    'T_{k}: time the tag sends packet k, on the tag clock (the same clock stamps the IMU)',
+    't_{k,i}: time anchor i receives it, on the anchors\' network clock',
+    'c: speed of light, so y is in metres',
+    'p, R: drone position and attitude;  ℓ: tag offset from the IMU',
+    'a_{i}: position of anchor i (8 anchors in simulation)',
+    'δ = t − T: tag clock offset;  Δ_{i}: offset of anchor i (0 if synchronized)',
+    'n_{k,i}: timestamp noise, σ = 10 cm',
+  ], { x: 6.35, y: 2.6, w: 6.38, h: 3.4, fontSize: 16, gap: 5 });
+  box(s, X0, 6.12, CW, 0.7);
+  text(s, '**TDoA** subtracts two rows to remove δ. **We keep all N rows** and estimate δ together with the pose.', { x: X0 + 0.2, y: 6.27, w: CW - 0.4, h: 0.45, fontSize: 19 });
+  s.addNotes('A UWB tag on the drone sends packets; each anchor timestamps the arrival on the network clock. Multiplying the time difference by c gives a range plus the tag clock offset delta plus the anchor offset Delta_i. The usual approach, TDoA, subtracts two anchors to cancel delta. We keep the raw timestamps and estimate delta and its drift in the filter. Walk through each symbol. The figure on the left is the report\'s Figure 1 for S1: synchronized anchors and a tag clock with a constant offset.');
+}
+// 3. State and Gal(3)
+{
+  const s = content('Background', 'Pose, velocity and tag clock form one Galilean transformation, so the filter can work on Gal(3)', 'Background');
+  head(s, 'Estimated state', X0, 1.75, 5.6);
+  eq(s, 'state', X0, 2.15);
+  text(s, [
+    'R: attitude;  v, p: velocity and position (world frame)',
+    'δ: tag clock offset',
+    'b_{ρ}: tag clock skew, the rate error of the tag crystal (about 20 ppm)',
+    'b_{ω}, b_{a}: gyro and accelerometer biases',
+  ], { x: X0, y: 2.8, w: 5.8, h: 1.9, fontSize: 16, gap: 6 });
+  head(s, 'The same state as one group element', 6.75, 1.75, 6.0);
+  const f = eq(s, 'Fmat', 6.75, 2.12, 0.85);
+  eq(s, 'vp', 6.75, 2.17 + f.h);
+  text(s, [
+    'v_{F}, p_{F}: velocity and position in a free-falling frame',
+    'A Galilean transformation acts on events (x, t) ↦ (Rx + vt + p, t + s): rotation, boost, shift in space and in time',
+  ], { x: 6.75, y: 2.72 + f.h, w: 5.98, h: 1.0, fontSize: 15, gap: 4, color: INK });
+  // EqF vs EKF error
+  const yb = 5.15, bh = 1.68, bw = 5.95;
+  box(s, X0, yb, bw, bh, EQF_SOFT);
+  head(s, 'EqF: error on the group', X0 + 0.2, yb + 0.12, bw - 0.4, EQF);
+  const e1 = eq(s, 'err_eqf', X0 + 0.2, yb + 0.5);
+  text(s, 'Symmetry group **G** = Gal(3) ⋉ gal(3), 20 dimensions. Biases sit in gal(3): b = (b_{ω}, b_{a}, b_{ν}, b_{ρ}); b_{ν} = 0 in truth.',
+    { x: X0 + 0.2, y: yb + 0.6 + e1.h, w: bw - 0.4, h: 0.75, fontSize: 15 });
+  box(s, X0 + bw + 0.233, yb, bw, bh, PANEL);
+  head(s, 'EKF: error by subtraction', X0 + bw + 0.433, yb + 0.12, bw - 0.4, EKF);
+  const e2 = eq(s, 'err_ekf', X0 + bw + 0.433, yb + 0.5);
+  text(s, 'Standard error-state EKF: rotation error Log(R̂^{T}R), all other states subtracted. 17 states (no b_{ν}).',
+    { x: X0 + bw + 0.433, y: yb + 0.6 + e2.h, w: bw - 0.4, h: 0.75, fontSize: 15 });
+  cite(s, 'Delama et al., Galilean State Estimation for INS with Unknown Time Delay, RSS 2026 (arXiv:2605.13266)');
+  s.addNotes('The state is attitude, velocity, position, tag clock offset, the IMU biases and the tag clock skew. Rotation, velocity, position and the clock offset fit in one 5x5 matrix F: a Galilean transformation, which rotates, boosts and shifts events in space and time. v_F and p_F are in a free-falling frame; the bottom formulas convert back. Delama et al. built an equivariant filter on Gal(3) semidirect gal(3) for GNSS and IMU; we use it for UWB. The difference to the EKF is only the error definition: the EqF defines the error on the group, X = exp(eps) X-hat; the EKF subtracts. The EqF has 20 states because of the extra velocity-input bias b_nu, which is zero in truth.');
+}
+// 4. Questions and metric
+{
+  const s = content('Background', 'We ask three questions, and score each filter by whether its covariance matches its actual error', 'Background');
+  box(s, X0, 1.75, CW, 1.62, PANEL);
+  text(s, [
+    '**Q1.** Does the clock–motion coupling in Gal(3) matter for UWB?  (speeds up to 45 m/s)',
+    '**Q2.** Is the EqF more consistent than an EKF, and when?  (harder clock setups, S1 to S3)',
+    '**Q3.** With unsurveyed anchors, does the EqF avoid the overconfidence of EKF-SLAM?  (S4)',
+  ], { x: X0 + 0.25, y: 1.92, w: CW - 0.5, h: 1.4, fontSize: 20, gap: 10 });
+  head(s, 'Metric: NEES', X0, 3.75, 5.6);
+  const n = eq(s, 'nees', X0, 4.15);
+  text(s, [
+    'e: actual error;  P: the filter\'s covariance;  dim e: number of states',
+    'Averaged over time and Monte Carlo runs',
+    '**1 = consistent;  above 1 = overconfident** (P too small)',
+  ], { x: X0, y: 4.25 + n.h, w: 5.9, h: 1.3, fontSize: 16, gap: 5 });
+  head(s, 'Setup', 6.75, 3.75, 6.0);
+  text(s, [
+    '**Baselines:** error-state EKF with the same inputs and noise; FEJ-EKF in S4',
+    '**Simulation:** circles at 0 to 45 m/s, 8 anchors, 200 Hz IMU, 20 Hz UWB; 50 runs of 30 s (S4: 30 runs of 90 s)',
+    '**Real IMU:** 10 MILUV flights with motion-capture truth; UWB timestamps simulated at its 6 anchors',
+  ], { x: 6.75, y: 4.15, w: 5.98, h: 2.4, fontSize: 16, bullet: true, gap: 8 });
+  cite(s, 'MILUV: Shalaby et al., 2025 (arXiv:2504.14376)');
+  s.addNotes('Three questions. Q1: the Galilean group couples clock and motion; does that matter for UWB? It grows with speed, so we go up to 45 m/s. Q2: is the EqF more consistent than an EKF? Q3: when the anchors are not surveyed, EKF-SLAM is known to become overconfident; does the EqF avoid that? Consistency is measured by NEES per degree of freedom: 1 means the covariance matches the actual error, above 1 means the filter is too sure of itself. Baselines are an error-state EKF and, for S4, the first-estimates Jacobian EKF.');
+}
+
+// ===================================================================
+pres.addSection({ title: 'Scenarios' });
+// 5. S1 filter
+{
+  const s = content('S1 · Synchronized anchors, fixed tag clock', 'S1 uses the base filter: the IMU moves the estimate, and each tag packet corrects it', 'Scenarios');
+  chips(s, 1, 1.72);
+  head(s, 'Propagation, every IMU sample (200 Hz)', X0, 3.0, 8.5);
+  const a = eq(s, 'dyn', X0, 3.38);
+  eq(s, 'prop', X0, 3.45 + a.h);
+  text(s, [
+    'ω_{m}, a_{m}: gyro, accelerometer',
+    'g_{N}: gravity, and time at rate 1',
+    'Γ = exp(−g_{N} ΔT)',
+  ], { x: 9.35, y: 3.38, w: 3.38, h: 1.1, fontSize: 14, gap: 4 });
+  text(s, 'A\'s pose and velocity block depends only on g and ΔT, not on the estimate (in the EKF it contains R̂, v̂ and a_{m}).',
+    { x: X0, y: 4.58, w: CW, h: 0.3, fontSize: 15, color: MUTED });
+  head(s, 'Update, every tag packet (20 Hz per anchor)', X0, 5.0, 8.5);
+  const h = eq(s, 'H', X0, 5.36);
+  text(s, [
+    'u_{i}: unit vector from anchor i to the tag',
+    '**Blue:** the clock–motion coupling, which Q1 tests',
+    'Correction on the group: X̂ ← exp(K r) X̂',
+  ], { x: X0 + h.w + 0.3, y: 5.36, w: CW - h.w - 0.3, h: 1.4, fontSize: 14, gap: 5 });
+  s.addNotes('Top: the chips show what S1 uses; dashed ones come in later scenarios. Propagation: each IMU sample moves F along the Galilean dynamics, with gravity and the passage of time in g_N. The useful property: the part of the transition matrix A that acts on pose and velocity depends only on gravity and the time step, not on the estimate. Update: each tag packet gives one row of H. The blue delta-hat entries are the Galilean coupling between clock and motion. UWB fixes delta to about 0.1 ns; at 45 m/s the drone moves 4.5 nm in that time, so we expect no gain on the clock. The correction is applied on the group.');
+}
+// 6. S1 results
+{
+  const s = content('S1 · Results', 'S1: the EqF matches the EKF\'s accuracy and is more consistent only near hover', 'Scenarios');
+  fig(s, 'sweep_s1', X0, 1.8, 7.3, 'NEES against flight speed in S1 for EKF and EqF');
+  head(s, 'What to take away', 8.25, 1.85, 4.48);
+  text(s, [
+    'Position error 3.0–3.6 cm for both filters, never more than 0.01 cm apart',
+    'Hover: NEES 1.06 vs 1.16, mostly from heading (1.23 vs 1.31)',
+    'From 5 to 45 m/s the two agree within 0.02',
+    'Poor start (30 cm, 0.01 rad/s gyro bias): EqF 1.2, EKF 1.8 at hover',
+    '**Q1:** tag clock error 0.50 cm at hover and 0.47 cm at 45 m/s, the same for both. The coupling has no measurable effect.',
+  ], { x: 8.25, y: 2.3, w: 4.48, h: 4.5, fontSize: 17, bullet: true, gap: 9 });
+  cite(s, 'Simulation, 50 runs of 30 s per speed. Report Figure 2. Grey band: scene scaled by v² so the turn stays at 12.5 m/s².');
+  s.addNotes('NEES against speed for S1. At hover the EqF is closer to 1: 1.06 against 1.16, and most of the gap is heading. From 5 m/s on, the two filters are the same within 0.02. Accuracy is identical. For Q1: the clock error is half a centimetre of light travel at hover and at 45 m/s, for both filters. The clock coupling does not matter for UWB.');
+}
+// 7. S2
+{
+  const s = content('S2 · Synchronized anchors, drifting tag clock', 'S2: a drifting tag clock only adds process noise, and the results match S1', 'Scenarios');
+  const y = chips(s, 2, 1.72);
+  fig(s, 'sweep_s2', X0, y + 0.15, 6.6, 'NEES against flight speed in S2 for EKF and EqF');
+  head(s, 'Change to the filter', 7.6, y + 0.2, 5.1);
+  const e = eq(s, 's2', 7.6, y + 0.6);
+  text(s, 'η_{δ}, η_{ρ}: white noise from the crystal; skews spread over 20 ppm. No new states or measurements.',
+    { x: 7.6, y: y + 0.7 + e.h, w: 5.13, h: 0.7, fontSize: 15 });
+  head(s, 'Results', 7.6, y + 1.65 + e.h, 5.1);
+  text(s, [
+    'Hover: NEES 1.08 vs 1.19; within 0.02 from 5 m/s',
+    'Position error 3.0–3.7 cm for both',
+    'Tag clock error 3.05 cm for both, at every speed',
+  ], { x: 7.6, y: y + 2.05 + e.h, w: 5.13, h: 1.6, fontSize: 17, bullet: true, gap: 7 });
+  cite(s, 'Simulation, 50 runs of 30 s per speed. Report Figure 2.');
+  s.addNotes('S2 lets the tag clock drift: a skew from a 20 ppm spread plus crystal noise. The filter does not change except for a random walk on delta and b_rho in the process noise. Results look like S1: the EqF is a bit more consistent at hover, and the same from 5 m/s. The clock error grows to 3 cm because the clock now drifts, but it is the same for both filters.');
+}
+// 8. S3 filter
+{
+  const s = content('S3 · Unsynchronized anchors', 'S3: unsynchronized anchors add 14 clock states, measured by packets the anchors send each other', 'Scenarios');
+  const y = chips(s, 3, 1.72);
+  const d = fig(s, 'sc3', X0, y + 0.15, 5.5, 'S3: anchors with their own drifting clocks send packets to each other');
+  text(s, 'Report Figure 1 (S3): dashed lines are anchor packets; right, each clock\'s offset over 30 s, relative to anchor 0.',
+    { x: X0, y: y + 0.2 + d.h, w: 5.5, h: 0.5, fontSize: 13, color: MUTED });
+  const xr = 6.45, wr = 12.733 - 6.45;
+  head(s, 'Anchor packets', xr, y + 0.15, wr);
+  const a = eq(s, 'anc', xr, y + 0.52);
+  text(s, [
+    'Anchor j sends, anchor m timestamps it (10 Hz per anchor)',
+    '‖a_{m} − a_{j}‖ is known, so the packet measures Δ_{m} − Δ_{j}',
+  ], { x: xr, y: y + 0.62 + a.h, w: wr, h: 0.75, fontSize: 15, gap: 4 });
+  head(s, 'Anchor clock states', xr, y + 1.55 + a.h, wr);
+  const b = eq(s, 's3dyn', xr, y + 1.92 + a.h);
+  text(s, [
+    'Δ_{i}, κ_{i}: offset and skew of anchor i relative to anchor 0 (±1 ms, 20 ppm)',
+    'Gal(3) has one time slot, the tag\'s, so the anchor clocks sit outside the group: **G** × ℝ^{14}, with additive error',
+  ], { x: xr, y: y + 2.02 + a.h + b.h, w: wr, h: 1.2, fontSize: 15, gap: 4 });
+  s.addNotes('In S3 every anchor has its own clock: an offset and a skew relative to anchor 0, so 14 more states for 8 anchors. They are observed through anchor packets: anchor j sends, anchor m timestamps. With surveyed anchors the distance between them is known, so the packet measures the clock difference. Gal(3) has a single time coordinate, the tag clock, so the anchor clocks are a direct product with additive error. In H, a tag packet gets c in its anchor\'s Delta column, an anchor packet gets +c and -c.');
+}
+// 9. S3 results
+{
+  const s = content('S3 · Results', 'S3 with surveyed anchors: every clock is estimated, and the EqF and EKF again match', 'Scenarios');
+  fig(s, 'sweep_s3', X0, 1.8, 7.3, 'NEES against flight speed in S3 for EKF and EqF');
+  head(s, 'What to take away', 8.25, 1.85, 4.48);
+  text(s, [
+    'Hover: NEES 1.02 vs 1.07; heading 1.23 vs 1.41',
+    'Position error 3.1–3.8 cm for both',
+    'Tag clock error 4.2 cm for both, at every speed',
+    '**Real IMU (MILUV), S1 to S3:** the two filters give the same result on every flight; horizontal error 3.3–6.1 cm',
+  ], { x: 8.25, y: 2.3, w: 4.48, h: 4.5, fontSize: 17, bullet: true, gap: 9 });
+  cite(s, 'Simulation, 50 runs of 30 s per speed (report Figure 2). MILUV: 10 flights, 8 draws each (report Figure 3).');
+  s.addNotes('With anchor packets, all anchor clocks are estimated and the picture is the same as S1 and S2: the EqF is slightly more consistent at hover, identical from 5 m/s, and equally accurate. On MILUV, with real IMU data, the two filters give the same result on every flight for S1 to S3. The vertical error on MILUV is large for both, 7 to 62 cm, because the anchors are nearly coplanar. So with surveyed anchors the EqF brings little. The anchor packets become important in S4.');
+}
+// 10. S4 filter
+{
+  const s = content('S4 · Unsurveyed anchors', 'S4: putting the anchors in the group keeps the unobservable scene motions fixed in the EqF error', 'Scenarios');
+  const y = chips(s, 4, 1.72);
+  fig(s, 'sc4room', X0, y + 0.1, 2.1, 'S4: anchor positions known only to about 30 cm; rotating or shifting the whole scene gives the same readings');
+  text(s, ['● true anchor', '○ survey guess, about 30 cm off', 'dashed: the whole scene rotated, which gives the same readings'],
+    { x: 2.85, y: y + 0.25, w: 2.4, h: 1.9, fontSize: 14, gap: 6, color: INK });
+  const xr = 5.45, wr = 12.733 - 5.45;
+  const p = eq(s, 'prior', xr, y + 0.12);
+  text(s, 'Anchor positions join the state: 3 per anchor, 24 more states', { x: xr, y: y + 0.18 + p.h, w: wr, h: 0.3, fontSize: 15 });
+  const sc = eq(s, 'scene', xr, y + 0.62 + p.h);
+  text(s, 'changes no measurement, so these 4 directions (yaw about gravity, 3 shifts) are unobservable. Only the prior fixes them.',
+    { x: xr, y: y + 0.7 + p.h + sc.h, w: wr, h: 0.6, fontSize: 15 });
+  const yb = 5.1, bh = 1.72, bw = 5.95;
+  box(s, X0, yb, bw, bh, EQF_SOFT);
+  head(s, 'EqF: anchors are part of the group element', X0 + 0.2, yb + 0.12, bw - 0.4, EQF);
+  const n1 = eq(s, 'nyaw_eqf', X0 + 0.2, yb + 0.5);
+  text(s, 'The same for every estimate, so no update adds heading information.', { x: X0 + 0.2, y: yb + 0.58 + n1.h, w: bw - 0.4, h: 0.6, fontSize: 15 });
+  const x2 = X0 + bw + 0.233;
+  box(s, x2, yb, bw, bh, PANEL);
+  head(s, 'EKF: the direction moves with the estimate', x2 + 0.2, yb + 0.12, bw - 0.4, EKF);
+  const n2 = eq(s, 'nyaw_ekf', x2 + 0.2, yb + 0.5);
+  text(s, 'Each update then adds heading information that no measurement gave: overconfident. **FEJ-EKF** freezes these Jacobians at first estimates.',
+    { x: x2 + 0.2, y: yb + 0.56 + n2.h, w: bw - 0.4, h: 0.7, fontSize: 15 });
+  cite(s, 'FEJ-EKF: Huang, Mourikis and Roumeliotis, ICRA 2008; Li and Mourikis, IJRR 2013. Diagram: report Figure 1 (S4).');
+  s.addNotes('In S4 the anchor positions are only known to 30 cm (or 10 cm) per axis, so they join the state. Rotating the whole scene about gravity, or shifting it, changes no measurement: four unobservable directions. A consistent filter must not gain information along them. In the EqF the anchors become extra columns of the group element, as landmarks do in invariant EKF-SLAM. Scene yaw is then the constant direction (e_z, 0, ...), whatever the estimate. In the EKF the same direction depends on the estimate, and because the EKF linearizes the update and the propagation at different points, it gains heading information at every update. FEJ-EKF fixes this by evaluating all Jacobians at first estimates; the cost is that the anchor Jacobians stay at the initial guess, 30 cm off, for the whole flight. Details in Appendix A.');
+}
+// 11. S4 results
+{
+  const s = content('S4 · Results', 'S4: with anchor packets the EqF stays consistent, while FEJ-EKF becomes overconfident', 'Scenarios');
+  const d = fig(s, 'slam_s3_2', X0, 1.8, 7.3, 'NEES over a 90 s flight with unsurveyed anchors, S3 clocks, 2 m/s: EKF, FEJ-EKF and EqF');
+  text(s, '30 cm survey, S3 clocks, 2 m/s; mean of 30 runs (report Figure 4)', { x: X0 + 0.9, y: 1.8 + d.h - 0.02, w: 6.4, h: 0.3, fontSize: 13, color: MUTED });
+  head(s, 'NEES at 90 s, 30 cm survey', 8.25, 1.85, 4.48);
+  text(s, [
+    '**S3 clocks, 2–5 m/s:** EqF 1.05–1.12, EKF 1.22–1.80, FEJ 3.72–7.63. FEJ applies the anchor packets through Jacobians at the 30 cm-off guess.',
+    '**S1 clocks, 5 m/s:** EqF 1.05, FEJ 1.95, EKF 5.75',
+    '**Hover:** no filter is consistent (S1: EKF 33, FEJ 25, EqF 68). Rotating only the drone is not a scene motion.',
+    '**Accuracy is equal:** drone 12–15 cm, anchors 14–21 cm (surveyed: 3 cm)',
+  ], { x: 8.25, y: 2.3, w: 4.48, h: 4.6, fontSize: 16, bullet: true, gap: 9 });
+  s.addNotes('NEES over the 90 s flight with unsurveyed anchors, here with the S3 clocks at 2 m/s. FEJ-EKF climbs to 7.6: the anchor packets measure anchor-to-anchor distances, and FEJ applies them through Jacobians evaluated at the initial anchor guess, which is 30 cm off. The EqF stays near 1. With a fixed tag clock at 5 m/s, the EqF is the only consistent filter: 1.05, against 1.95 for FEJ and 5.75 for the EKF. What does not work: at hover none of the filters is consistent; there the drone can turn on its own, and that direction is not one of the scene motions the group handles. Accuracy is the same for all three.');
+}
+
+// ===================================================================
+pres.addSection({ title: 'Overall' });
+// 12. Overall table
+{
+  const s = content('Overall results', 'Across scenarios, the EqF helps only when the anchor positions have to be estimated', 'Overall');
+  const H = (t) => ({ text: t, options: { bold: true, color: NAVY, fill: { color: PANEL } } });
+  const c = (t, o) => ({ text: rich(t), options: o || {} });
+  const win = { fill: { color: EQF_SOFT } };
+  const rows = [
+    [H('Scenario'), H('Accuracy'), H('Consistency in simulation (NEES)'), H('Real IMU (MILUV)')],
+    [c('**S1** fixed tag clock'), c('same, 3.0–3.6 cm'), c('EqF better only near hover: 1.06 vs 1.16'), c('same; both overconfident on some flights')],
+    [c('**S2** drifting tag clock'), c('same, 3.0–3.7 cm'), c('hover 1.08 vs 1.19; equal from 5 m/s'), c('same; NEES 0.8–4.9')],
+    [c('**S3** unsynchronized anchors'), c('same, 3.1–3.8 cm'), c('hover 1.02 vs 1.07; equal from 5 m/s'), c('same; NEES 0.8–5.0')],
+    [c('**S4** with S1 clocks'), c('same; drone 12–15 cm'), c('5 m/s: **EqF 1.05**, FEJ 1.95, EKF 5.75', win), c('FEJ diverged in 2 of 80 runs')],
+    [c('**S4** with S2 clocks'), c('same'), c('2–5 m/s: **FEJ 1.7–2.2**, EqF 2.7–4.3, EKF 3.0–7.1'), c('FEJ most robust: 12–18 cm (EKF up to 80, EqF up to 50)')],
+    [c('**S4** with S3 clocks'), c('same'), c('2–5 m/s: **EqF 1.05–1.12**, EKF 1.2–1.8, FEJ 3.7–7.6', win), c('FEJ most overconfident')],
+  ];
+  s.addTable(rows, {
+    x: X0, y: 1.8, w: CW, colW: [2.55, 2.35, 4.13, 3.103], fontSize: 15, color: INK, valign: 'middle',
+    margin: [0.06, 0.1, 0.06, 0.1], border: { type: 'solid', pt: 0.75, color: 'C9CFD7' }, rowH: 0.56,
+  });
+  text(s, [
+    '**Blue:** the EqF is the only consistent filter. Simulated NEES at 90 s for S4, averaged over the flight for S1 to S3.',
+    'S4 with a 10 cm survey: all three filters at 0.94–1.21 when moving. With a 30 cm survey none is consistent at hover.',
+  ], { x: X0, y: 6.0, w: CW, h: 0.85, fontSize: 15, gap: 4, color: INK });
+  s.addNotes('One row per scenario. Accuracy never differs between the filters. With surveyed anchors, S1 to S3, the EqF is only slightly more consistent near hover, and on real IMU data the filters are the same. The EqF matters in S4: with anchor packets, and with a fixed tag clock at 5 m/s, it is the only consistent filter. FEJ-EKF is better with a drifting tag clock, and on MILUV in S2 it is the most robust. With a 10 cm survey all three are fine, so the problem only appears with a poor survey.');
+}
+// 13. Conclusions
+{
+  const s = content('Conclusions', 'The EqF\'s advantage for UWB is in estimating anchor positions, not in the clock coupling', 'Overall');
+  text(s, [
+    '**1. Q1:** for UWB the clock–motion coupling is nanometres at any drone speed. Both filters estimate the clock equally well.',
+    '**2. Q2:** with surveyed anchors the EqF matches the EKF in accuracy, and is more consistent only near hover or after a poor start.',
+    '**3. Q3:** with unsurveyed anchors the EqF keeps the scene motions unobservable without freezing Jacobians. It is the only consistent filter with anchor packets (S3) and with a fixed tag clock at 5 m/s. It does not fix hover, and FEJ is better with a drifting tag clock.',
+  ], { x: X0, y: 1.8, w: CW, h: 3.2, fontSize: 20, gap: 12 });
+  const yb = 5.05, bw = 5.95;
+  box(s, X0, yb, bw, 1.75, PANEL);
+  text(s, [{ t: '**Next**', gap: 4 }, 'FEJ for the drone\'s own heading inside the EqF; an invariant-EKF baseline; a setting with large time coupling (unknown IMU-to-UWB latency); real timestamps from Crazyflie firmware'],
+    { x: X0 + 0.2, y: yb + 0.14, w: bw - 0.4, h: 1.5, fontSize: 15 });
+  box(s, X0 + bw + 0.233, yb, bw, 1.75, PANEL);
+  text(s, [{ t: '**Limitations**', gap: 4 }, 'High-speed scenes are scaled (anchors up to 227 m high); MILUV timestamps are simulated; the EqF\'s drop at 7.5 m/s is not explained yet (Appendix B)'],
+    { x: X0 + bw + 0.433, y: yb + 0.14, w: bw - 0.4, h: 1.5, fontSize: 15 });
+  s.addText([{ text: 'Report: ', options: { color: MUTED } }, { text: REPORT.replace('https://', ''), options: { hyperlink: { url: REPORT }, color: EQF } }, { text: '   ·   feedback welcome', options: { color: MUTED } }],
+    { isTextBox: true, x: X0, y: 7.0, w: 11.4, h: 0.3, margin: 0, fontSize: 12 });
+  s.addNotes('To sum up. Q1: no, the Galilean clock coupling is negligible for UWB. Q2: with surveyed anchors the EqF and EKF are essentially the same. Q3: the EqF does help when the anchors are unsurveyed, most clearly with anchor packets, where the standard fix FEJ-EKF fails. It does not solve hover. Next steps and limitations are below; I would like feedback on which direction to take.');
+}
+
+// ===================================================================
+pres.addSection({ title: 'References and appendix' });
+// 14. References
+{
+  const s = content('Sources', 'References', 'References and appendix');
+  text(s, [
+    'Delama et al. (2026). Galilean State Estimation for INS with Unknown Time Delay. Robotics: Science and Systems (RSS). arXiv:2605.13266.',
+    'Huang, G. P., Mourikis, A. I., and Roumeliotis, S. I. (2008). Analysis and improvement of the consistency of extended Kalman filter based SLAM. IEEE ICRA, 473–479. doi:10.1109/ROBOT.2008.4543252.',
+    'Li, M., and Mourikis, A. I. (2013). High-precision, consistent EKF-based visual-inertial odometry. International Journal of Robotics Research, 32(6), 690–711.',
+    'Shalaby, M. A., et al. (2025). MILUV: A Multi-UAV Indoor Localization dataset with UWB and Vision. arXiv:2504.14376.',
+    'Full report for this work: ' + REPORT,
+  ], { x: X0, y: 1.8, w: CW, h: 4.8, fontSize: 16, gap: 12 });
+  s.addNotes('References for the slides.');
+}
+// 15. Appendix A
+{
+  const s = content('Appendix A · S4 filter details', 'In the EqF the anchors are columns of the group element, so the scene directions never move', 'References and appendix');
+  const x = eq(s, 'Xanc', X0, 1.85);
+  const xr = X0 + x.w + 0.4, wr = 12.733 - xr;
+  text(s, 'The group product rotates and shifts the anchor columns together with the drone. Scene yaw and shift are left multiplications, so in ε they are constant:',
+    { x: xr, y: 1.85, w: wr, h: 1.0, fontSize: 16 });
+  const a = eq(s, 'nyaw_eqf', xr, 2.95);
+  eq(s, 'ntau', xr, 3.05 + a.h);
+  text(s, 'τ in the translation slot and in every anchor slot. In H_{i} the rotation and anchor entries become:', { x: X0, y: 4.0, w: CW, h: 0.35, fontSize: 16 });
+  eq(s, 'Hanc', X0, 4.4);
+  text(s, 'A linearized filter keeps N unobservable if', { x: X0, y: 5.1, w: 5.0, h: 0.35, fontSize: 16 });
+  eq(s, 'obs', X0 + 4.55, 5.05);
+  text(s, 'with each N_{k} evaluated where H_{k} and Φ_{k} are. The EKF evaluates H_{k} at x̂^{−} but propagates from x̂^{+}, so the second condition fails at every update. FEJ evaluates every Jacobian at first estimates; the EqF gets it from the group.',
+    { x: X0, y: 5.6, w: CW, h: 1.0, fontSize: 16 });
+  cite(s, 'Huang, Mourikis and Roumeliotis, ICRA 2008; Li and Mourikis, IJRR 2013');
+  s.addNotes('Backup for questions on S4. The anchors are extra columns of the group element, so the group product moves them with the drone. Rotating or shifting the whole scene is a left multiplication, which in the EqF error coordinates is a constant direction. The observability conditions are H N = 0 and Phi N = N_next; the EKF breaks the second one because it linearizes the update at the prior estimate and the propagation at the posterior.');
+}
+// 16. Appendix B
+{
+  const s = content('Appendix B · Faster flights (not in the report)', 'At 7.5 m/s the EqF loses its S1 advantage; with anchor packets (S3) it stays closest to 1', 'References and appendix');
+  const H = (t) => ({ text: t, options: { bold: true, color: NAVY, fill: { color: PANEL } } });
+  const c = (t, o) => ({ text: rich(t), options: o || {} });
+  const best = { fill: { color: EQF_SOFT } };
+  const rows = [
+    [H('Setting'), H('S1 clocks'), H('S2 clocks'), H('S3 clocks')],
+    [c('Room, 5 m/s'), c('5.75 / 1.95 / **1.05**', best), c('7.09 / **1.72** / 2.68'), c('1.21 / 3.72 / **1.04**', best)],
+    [c('Room, 7.5 m/s'), c('7.51 / **2.16** / 15.35'), c('10.95 / **2.10** / 11.80'), c('1.34 / 2.85 / **1.26**', best)],
+    [c('Room, 10 m/s'), c('3.98 / 4.90 / 8.95'), c('6.86 / 5.20 / 10.29'), c('3.61 / 4.97 / 3.51')],
+    [c('Larger scene, 10 m/s'), c('0.98 / 1.01 / 0.95'), c('0.99 / 1.01 / 0.95'), c('1.08 / 1.49 / 1.03')],
+    [c('Larger scene, 20 m/s'), c('0.97 / 0.97 / 0.94'), c('1.01 / 1.00 / 0.97'), c('1.23 / 1.26 / 1.21')],
+  ];
+  text(s, 'Full-state NEES at 90 s, **EKF / FEJ-EKF / EqF**, 30 cm survey, 30 runs. Blue: EqF closest to 1.', { x: X0, y: 1.75, w: CW, h: 0.35, fontSize: 15 });
+  s.addTable(rows, {
+    x: X0, y: 2.15, w: CW, colW: [3.0, 3.044, 3.044, 3.045], fontSize: 15, color: INK, valign: 'middle',
+    margin: [0.05, 0.1, 0.05, 0.1], border: { type: 'solid', pt: 0.75, color: 'C9CFD7' }, rowH: 0.42,
+  });
+  text(s, [
+    '**Room, harder turns:** at 7.5 m/s the EqF loses its S1 advantage; not diagnosed yet. At 10 m/s even the surveyed filters reach 2.9–4.4 (200 Hz IMU too slow), so that row says little.',
+    '**Larger scene, same 12.5 m/s² turn:** every filter is consistent from 10 m/s, because 30 cm is small next to the scene.',
+    '**Survey error scaled with the scene (1.2–4.8 m):** every filter fails (NEES 28–5000), and FEJ diverges in 3–100 % of S1 and S2 flights.',
+  ], { x: X0, y: 4.85, w: CW, h: 2.0, fontSize: 15, bullet: true, gap: 6 });
+  cite(s, 'experiments/01_unsurveyed_anchors, results fast_same_room, fast_big_scene and fast_big_scene_scaled');
+  s.addNotes('Backup, not in the report. I tried flights faster than 5 m/s three ways. In the same room, turns get much harder and the EqF loses its S1 advantage at 7.5 m/s, which I have not diagnosed. In a scene scaled up so the turn stays the same, everything becomes consistent, because a 30 cm survey error is small relative to the scene. If the survey error grows with the scene, every filter fails. The S3 case with anchor packets stays the most robust EqF result.');
+}
+
+(async () => {
+  const out = 'gal3uwb_update.pptx';
+  await pres.writeFile({ fileName: out });
+  // pptxgenjs writes an <a:pPr> before every run; only the first belongs to the paragraph.
+  // Later ones are invalid and make LibreOffice drop the bullet, so remove them.
+  const JSZip = require(require.resolve('jszip', { paths: [require.resolve('pptxgenjs')] }));
+  const zip = await JSZip.loadAsync(fs.readFileSync(out));
+  let removed = 0;
+  for (const name of Object.keys(zip.files).filter(n => /^ppt\/(slides|slideLayouts|slideMasters)\/[^/]+\.xml$/.test(n))) {
+    const xml = await zip.file(name).async('string');
+    const fixed = xml.replace(/(<\/a:r>|<a:br\/>)<a:pPr\b(?:[^>]*?\/>|[^>]*?>[\s\S]*?<\/a:pPr>)/g, (m, head) => { removed++; return head; });
+    zip.file(name, fixed);
+  }
+  fs.writeFileSync(out, await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }));
+  console.log('removed', removed, 'extra a:pPr');
+  await applyTheme(out, THEME);
+  console.log('wrote', out);
+})().catch(e => { console.error(e); process.exit(1); });

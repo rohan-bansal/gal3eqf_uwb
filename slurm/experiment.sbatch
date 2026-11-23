@@ -1,5 +1,5 @@
 #!/bin/bash
-# Submit from the repo root:  sbatch slurm/experiment.sbatch experiments/<script>.py [extra args]
+# Submit from the repo root:  sbatch slurm/experiment.sbatch experiments/<NN_name>/<script>.py [extra args]
 # Some nodes run far past their allocation (load >> cores); check with
 #   sinfo -p rl2-lab -N -o "%N %O %c"
 # and add those to --exclude on the sbatch command line.

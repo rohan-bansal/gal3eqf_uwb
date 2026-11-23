@@ -45,6 +45,7 @@ class SimConfig:
     sigma_range: float = 0.1  # per-anchor timestamp noise, in metres [m]
     radius: float = 2.0
     height: float = 1.0
+    scale: float = 1.0  # scene scale: multiplies the anchor box, the circle radius and the flight height
     gyro_bias_sigma: float = 0.01  # [rad/s]
     accel_bias_sigma: float = 0.05  # [m/s^2]
     lever_arm: tuple = (0.0, 0.0, 0.0)  # tag position in the body frame [m]
@@ -123,9 +124,9 @@ def simulate(config: SimConfig, seed: int) -> SimData:
         noise=clock_model.noise,
         rng=rng,
     )
-    anchors = box_anchors()
+    anchors = config.scale * box_anchors()
     anchor_clocks = simulate_anchor_clocks(clock_model, len(anchors), config.duration, rng)
-    traj = CircleTrajectory(config.speed, config.radius, config.height)
+    traj = CircleTrajectory(config.speed, config.scale * config.radius, config.scale * config.height)
     T = np.arange(n) * dT
     gyro_bias0 = rng.normal(0.0, config.gyro_bias_sigma, 3)
     accel_bias0 = rng.normal(0.0, config.accel_bias_sigma, 3)

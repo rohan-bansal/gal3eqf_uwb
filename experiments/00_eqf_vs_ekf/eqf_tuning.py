@@ -7,7 +7,7 @@ sweeps the b_nu prior for a pessimistic initialization (0.3 m, 0.01 rad/s) and a
 first-fix initialization (0.1 m, gyro bias calibrated at rest to 0.002 rad/s).
 Step 2 clock model, synthetic circle flights, EKF alongside as the reference.
 
-    sbatch --cpus-per-task=8 slurm/experiment.sbatch experiments/eqf_tuning.py
+    sbatch --cpus-per-task=8 slurm/experiment.sbatch experiments/00_eqf_vs_ekf/eqf_tuning.py
 """
 
 import argparse

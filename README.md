@@ -28,7 +28,7 @@ src/gal3uwb/
   filters/    EqF on Gal(3) x| gal(3) (Delama et al.) and the SE2(3) EKF baseline
   data/       MILUV loader: real path and IMU with simulated UWB on top
   eval/       filter runner, RMSE and NEES
-experiments/  runnable studies
+experiments/  one numbered folder per study, each with its own README
 scripts/      data download
 tests/
 results/      generated outputs (gitignored)
@@ -37,19 +37,21 @@ data/         downloaded datasets (gitignored)
 
 ## Experiments
 
-- `experiments/synthetic.py`: synthetic circle flights at 0, 0.5, 2 and 5 m/s.
-  Step 1 (`ideal_clock`) is an ideal tag clock with an unknown constant offset;
-  step 2 (`gaussian_skew`) draws the skew from N(0, 20 ppm^2) per flight and adds
-  TCXO noise; step 3 (`unsynced`) adds a TCXO clock per anchor and
-  anchor-to-anchor packets at 10 Hz per anchor. Every filter runs on the same
-  data from the same initial estimate.
-- `experiments/miluv.py`: the same comparison on ten single-drone MILUV
-  flights, with the real mocap path and PX4 IMU and simulated UWB at MILUV's
-  anchor and tag positions.
-- `experiments/eqf_tuning.py`: sensitivity of the EqF to the prior on its
-  virtual velocity-input bias and to the initial uncertainty.
+Each study lives in its own folder under `experiments/`, numbered in the order
+they were done, with a README that says what it tests, how to run it and where
+its results go. Code that only one study needs stays in its folder; the shared
+library (groups, simulator, baseline filters, runner) is `src/gal3uwb/`.
 
-Each writes a `summary.csv`, the raw runs and figures under `results/<name>/`.
+- `experiments/00_eqf_vs_ekf/`: the EqF on Gal(3) against the EKF with surveyed
+  anchors, for three clock scenarios (synchronized anchors with a fixed or a
+  drifting tag clock; free-running anchors with anchor-to-anchor packets), on
+  synthetic circles from hover to 45 m/s and on ten MILUV flights.
+- `experiments/01_unsurveyed_anchors/`: the anchor positions are unknown and
+  estimated with the drone. An EKF with additive anchor states, the same EKF
+  with first-estimate Jacobians (the standard consistency fix), and an EqF
+  whose symmetry group also moves the anchors.
+
+Each writes a `summary.csv`, the raw runs and figures under `results/`.
 
 ## Conventions
 

@@ -9,8 +9,15 @@ fix (0.1 m) with the gyro bias calibrated at rest; --pos-sigma 0.3
 --gyro-bias-sigma 0.01 gives the pessimistic stress case. Steps 1-2 in
 results/synthetic_steps12* were run with --nu-loose 1e-2.
 
-    uv run python experiments/synthetic.py --runs 4     # quick look
-    sbatch slurm/experiment.sbatch experiments/synthetic.py --scenarios unsynced --out results/synthetic_step3
+--turn-accel a scales the whole scene (anchor box, circle radius, flight height)
+with the speed so every circle has centripetal acceleration a: the radius is
+v^2 / a. The measurement geometry is then the same at every speed and only the
+speed and turn rate change. a = 12.5 m/s^2 keeps the default 2 m circle at 5 m/s.
+
+    uv run python experiments/00_eqf_vs_ekf/synthetic.py --runs 4     # quick look
+    sbatch slurm/experiment.sbatch experiments/00_eqf_vs_ekf/synthetic.py --scenarios unsynced --out results/synthetic_step3
+    sbatch slurm/experiment.sbatch experiments/00_eqf_vs_ekf/synthetic.py --speeds 5 10 15 25 35 45 --turn-accel 12.5 \
+        --out results/synthetic_highspeed
 """
 
 import argparse
@@ -39,9 +46,10 @@ from gal3uwb.filters.ekf import Ekf
 from gal3uwb.filters.eqf import Eqf
 from gal3uwb.sim.scenario import SCENARIOS, SimConfig, simulate
 
-SPEEDS = [0.0, 0.5, 2.0, 5.0]  # [m/s]
+SPEEDS = [0.0, 0.5, 2.0, 5.0]  # default speeds [m/s]
+BASE_RADIUS = 2.0  # circle radius at scene scale 1 [m]
 # The EqF runs with Delama's tight prior on its virtual bias b_nu and with a looser one
-# (--nu-loose; experiments/eqf_tuning.py found ~3e-3 best).
+# (--nu-loose; experiments/00_eqf_vs_ekf/eqf_tuning.py found ~3e-3 best).
 FILTERS = {"EKF": Ekf, "EqF": Eqf, "EqF-loose": Eqf}
 NU_TIGHT = 1e-4
 SCENARIO_LABELS = {"ideal_clock": "step 1: ideal clock", "gaussian_skew": "step 2: Gaussian skew",
@@ -63,12 +71,13 @@ def present(res, metrics=METRICS):
 
 
 def run_task(task):
-    scenario, i_speed, seed, duration, nu_loose, skew_sigma, pos_sigma, gyro_bias_sigma, accel_bias_sigma = task
+    (scenario, i_speed, speed, scale, seed, duration, nu_loose, skew_sigma, pos_sigma, gyro_bias_sigma,
+     accel_bias_sigma) = task
     clock = SCENARIOS[scenario]
     if scenario == "gaussian_skew" and skew_sigma is not None:
         clock = replace(clock, skew_sigma=skew_sigma)
-    config = SimConfig(speed=SPEEDS[i_speed], clock=clock, duration=duration, gyro_bias_sigma=gyro_bias_sigma,
-                       accel_bias_sigma=accel_bias_sigma)
+    config = SimConfig(speed=speed, clock=clock, duration=duration, radius=BASE_RADIUS, scale=scale,
+                       gyro_bias_sigma=gyro_bias_sigma, accel_bias_sigma=accel_bias_sigma)
     sim = simulate(config, seed)
     # The prior matches the truth's: bias spreads, and the oscillator spec for the skew
     # (no tighter than 20 ppm, so step 1's zero skew is not known in advance).
@@ -92,9 +101,10 @@ def run_task(task):
     return scenario, i_speed, seed, out
 
 
-def sweep(scenarios, n_runs, duration, workers, *sigmas):
-    tasks = [(s, i, seed, duration, *sigmas) for s in scenarios for i in range(len(SPEEDS)) for seed in range(n_runs)]
-    shape = (len(scenarios), len(SPEEDS), n_runs)
+def sweep(scenarios, speeds, scales, n_runs, duration, workers, *sigmas):
+    tasks = [(s, i, speeds[i], scales[i], seed, duration, *sigmas) for s in scenarios for i in range(len(speeds))
+             for seed in range(n_runs)]
+    shape = (len(scenarios), len(speeds), n_runs)
     res, T = {}, None
     with Pool(workers) as pool:
         for done, (scenario, i, seed, out) in enumerate(pool.imap_unordered(run_task, tasks), 1):
@@ -113,13 +123,13 @@ def sweep(scenarios, n_runs, duration, workers, *sigmas):
     return res
 
 
-def write_csv(res, scenarios, path):
+def write_csv(res, scenarios, speeds, path):
     with open(path, "w", newline="") as f:
         w = csv.writer(f)
         metrics = present(res)
         w.writerow(["scenario", "speed_mps", "filter"] + metrics)
         for si, scenario in enumerate(scenarios):
-            for i, speed in enumerate(SPEEDS):
+            for i, speed in enumerate(speeds):
                 for name in FILTERS:
                     row = []
                     for m in metrics:
@@ -129,14 +139,14 @@ def write_csv(res, scenarios, path):
                     w.writerow([scenario, speed, name] + [f"{x:.6g}" for x in row])
 
 
-def print_table(res, scenarios):
+def print_table(res, scenarios, speeds):
     anchors = "nees_anchors" in present(res)
     print(f"\n{'scenario':>14} {'speed':>5} {'filter':>9} | {'pos cm':>6} {'yaw deg':>7} {'offset cm':>9} "
           + (f"{'anch cm':>7} " if anchors else "")
           + f"| {'NEES':>5} {'native':>6} {'rot':>5} {'yaw':>5} {'pos':>5} {'bias':>5} {'clock':>5}"
           + (f" {'anch':>5}" if anchors else ""))
     for si, scenario in enumerate(scenarios):
-        for i, speed in enumerate(SPEEDS):
+        for i, speed in enumerate(speeds):
             for name in FILTERS:
                 def rms(m):
                     return np.sqrt(np.mean(res[f"{name}_{m}"][si, i] ** 2))
@@ -173,7 +183,7 @@ def _axes(ax):
 LINE_STYLES = [("-", None), ("--", SURFACE), (":", SURFACE)]  # per scenario: line style, marker fill
 
 
-def plot_summary(res, scenarios, n_runs, labels, path):
+def plot_summary(res, scenarios, speeds, n_runs, labels, path):
     """Metrics vs speed: color is the filter, line style the scenario."""
     _style()
     panels = [
@@ -191,14 +201,14 @@ def plot_summary(res, scenarios, n_runs, labels, path):
             for name, color in FILTER_COLORS.items():
                 v = res[f"{name}_{key}"][si]
                 y = np.sqrt(np.mean(v**2, axis=-1)) if agg == "rms" else np.mean(v, axis=-1)
-                ax.plot(SPEEDS, scale * y, ls=ls, marker="o", color=color, mfc=mfc or color, lw=2, ms=6)
+                ax.plot(speeds, scale * y, ls=ls, marker="o", color=color, mfc=mfc or color, lw=2, ms=6)
         if key.startswith("nees"):
             dof = 1 if key == "nees_yaw" else int(res["dof"].min())
             lo, hi = chi2.ppf([0.025, 0.975], n_runs * dof) / (n_runs * dof)
             ax.axhspan(lo, hi, color=BAND, linewidth=0, zorder=0)
             ax.axhline(1.0, color=INK_2, lw=1, ls=":")
         ax.set_xlabel("drone speed [m/s]")
-        ax.set_xticks(SPEEDS)
+        ax.set_xticks(speeds)
         ax.set_ylabel(ylabel)
         ax.set_title(title, loc="left", color=INK, fontsize=10)
         ax.set_ylim(bottom=0)
@@ -212,18 +222,18 @@ def plot_summary(res, scenarios, n_runs, labels, path):
     plt.close(fig)
 
 
-def plot_series(res, scenarios, n_runs, labels, path):
+def plot_series(res, scenarios, speeds, n_runs, labels, path):
     """Average NEES across runs over time (ANEES), per speed, for each scenario."""
     _style()
     T = res["T"]
     rows = [(s, key) for s in scenarios for key in ("nees_native", "nees_yaw")]
-    fig, axes = plt.subplots(len(rows), len(SPEEDS), figsize=(14, 2.3 * len(rows)), facecolor=SURFACE,
+    fig, axes = plt.subplots(len(rows), len(speeds), figsize=(14, 2.3 * len(rows)), facecolor=SURFACE,
                              sharex=True, squeeze=False)
     for r, (scenario, key) in enumerate(rows):
         si = scenarios.index(scenario)
         dof = 1 if key == "nees_yaw" else int(res["dof"][si])
         lo, hi = chi2.ppf([0.025, 0.975], n_runs * dof) / (n_runs * dof)
-        for c, speed in enumerate(SPEEDS):
+        for c, speed in enumerate(speeds):
             ax = axes[r, c]
             _axes(ax)
             ax.axhspan(lo, hi, color=BAND, linewidth=0, zorder=0)
@@ -257,6 +267,9 @@ def main():
     parser.add_argument("--accel-bias-sigma", type=float, default=0.05, help="initial accel bias std [m/s^2]")
     parser.add_argument("--nu-loose", type=float, default=3e-3, help="b_nu prior of the second EqF [m/s]")
     parser.add_argument("--scenarios", nargs="+", default=list(SCENARIOS), choices=list(SCENARIOS))
+    parser.add_argument("--speeds", nargs="+", type=float, default=SPEEDS, help="drone speeds [m/s]")
+    parser.add_argument("--turn-accel", type=float, default=None,
+                        help="scale the scene so each circle has this centripetal acceleration [m/s^2]")
     parser.add_argument("--workers", type=int, default=min(16, os.cpu_count() or 1))
     parser.add_argument("--out", type=Path, default=Path("results/synthetic"))
     parser.add_argument("--replot", action="store_true", help="re-plot from <out>/runs.npz without running")
@@ -267,25 +280,36 @@ def main():
             res = {k: data[k] for k in data.files if k not in ("scenarios", "nu_loose")}
             scenarios = [str(s) for s in data["scenarios"]]
             nu_loose = float(data["nu_loose"]) if "nu_loose" in data.files else 1e-2  # older runs used 1e-2
+            speeds = [float(v) for v in data["speeds"]] if "speeds" in data.files else SPEEDS
+            res.pop("speeds", None), res.pop("scales", None)
             res.setdefault("dof", np.full(len(scenarios), 17.0))
     else:
         args.out.mkdir(parents=True, exist_ok=True)
-        scenarios = args.scenarios
-        n_tasks = len(scenarios) * len(SPEEDS) * args.runs
+        scenarios, speeds = args.scenarios, args.speeds
+        if args.turn_accel is None:
+            scales = [1.0] * len(speeds)
+        else:
+            if min(speeds) <= 0:
+                parser.error("--turn-accel needs positive speeds")
+            scales = [v**2 / args.turn_accel / BASE_RADIUS for v in speeds]
+            print("circle radius per speed: " + ", ".join(f"{v:g} m/s -> {BASE_RADIUS * k:.1f} m"
+                                                       for v, k in zip(speeds, scales)), flush=True)
+        n_tasks = len(scenarios) * len(speeds) * args.runs
         print(f"{n_tasks} flights x {len(FILTERS)} filters on {args.workers} workers", flush=True)
         t0 = time.time()
         nu_loose = args.nu_loose
-        res = sweep(scenarios, args.runs, args.duration, args.workers, nu_loose, args.skew_sigma, args.pos_sigma,
-                    args.gyro_bias_sigma, args.accel_bias_sigma)
+        res = sweep(scenarios, speeds, scales, args.runs, args.duration, args.workers, nu_loose, args.skew_sigma,
+                    args.pos_sigma, args.gyro_bias_sigma, args.accel_bias_sigma)
         print(f"done in {time.time() - t0:.0f} s")
-        np.savez(args.out / "runs.npz", scenarios=np.array(scenarios), nu_loose=nu_loose, **res)
+        np.savez(args.out / "runs.npz", scenarios=np.array(scenarios), nu_loose=nu_loose, speeds=np.array(speeds),
+                 scales=np.array(scales), **res)
 
     n_runs = res["EKF_pos_rmse"].shape[-1]
     labels = filter_labels(nu_loose)
-    write_csv(res, scenarios, args.out / "summary.csv")
-    plot_summary(res, scenarios, n_runs, labels, args.out / "summary.png")
-    plot_series(res, scenarios, n_runs, labels, args.out / "nees_over_time.png")
-    print_table(res, scenarios)
+    write_csv(res, scenarios, speeds, args.out / "summary.csv")
+    plot_summary(res, scenarios, speeds, n_runs, labels, args.out / "summary.png")
+    plot_series(res, scenarios, speeds, n_runs, labels, args.out / "nees_over_time.png")
+    print_table(res, scenarios, speeds)
     print(f"\nwrote {args.out}/summary.csv, runs.npz, summary.png, nees_over_time.png")
 
 
